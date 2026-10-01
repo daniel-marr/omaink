@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Placeholder icon: notebook page with an ink stroke. Replace before release. -->
+  <rect x="16" y="12" width="96" height="104" rx="10" fill="#1a1b26" stroke="#7aa2f7" stroke-width="4"/>
+  <line x1="28" y1="40" x2="100" y2="40" stroke="#3b4261" stroke-width="3" stroke-linecap="round"/>
+  <line x1="28" y1="58" x2="100" y2="58" stroke="#3b4261" stroke-width="3" stroke-linecap="round"/>
+  <line x1="28" y1="76" x2="100" y2="76" stroke="#3b4261" stroke-width="3" stroke-linecap="round"/>
+  <path d="M30 96 C 45 70, 60 104, 76 80 S 98 66, 102 88"
+        fill="none" stroke="#bb9af7" stroke-width="7" stroke-linecap="round"/>
+</svg>

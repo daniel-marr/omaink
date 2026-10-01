@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/omascratch-core",
+    "crates/omascratch-ink",
+    "crates/omascratch-store",
+    "crates/omascratch-theme",
+    "crates/omascratch-gtk",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/think3co/omascratch"
+rust-version = "1.92"
+
+[workspace.dependencies]
+omascratch-core = { path = "crates/omascratch-core" }
+omascratch-ink = { path = "crates/omascratch-ink" }
+omascratch-store = { path = "crates/omascratch-store" }
+omascratch-theme = { path = "crates/omascratch-theme" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+kurbo = { version = "0.11", features = ["serde"] }
+smallvec = { version = "1.13", features = ["serde"] }
+uuid = { version = "1.10", features = ["v7", "serde"] }
+thiserror = "2.0"
+freedraw = "1.0"
+rstar = "0.12"
+zstd = "0.13"
+tempfile = "3.10"
+toml = "0.8"
+tracing = "0.1"
+
+gtk4 = { version = "0.11", features = ["v4_18"] }
+libadwaita = { version = "0.9", features = ["v1_6"] }
+
+[profile.release]
+lto = "thin"

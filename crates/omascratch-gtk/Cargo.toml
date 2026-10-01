@@ -1,0 +1,20 @@
+[package]
+name = "omascratch-gtk"
+description = "OmaScratch GTK4 + libadwaita shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "omascratch"
+path = "src/main.rs"
+
+[dependencies]
+omascratch-core.workspace = true
+omascratch-ink.workspace = true
+omascratch-store.workspace = true
+omascratch-theme.workspace = true
+gtk4.workspace = true
+libadwaita.workspace = true
+tracing.workspace = true

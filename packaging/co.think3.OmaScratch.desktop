@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OmaScratch
+GenericName=Notes
+Comment=Ink-first notes with an infinite canvas
+Exec=omascratch
+Icon=co.think3.OmaScratch
+Terminal=false
+Categories=Office;
+Keywords=notes;ink;stylus;notebook;canvas;
+StartupNotify=true

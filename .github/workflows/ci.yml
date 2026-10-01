@@ -1,0 +1,25 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+# Builds and unit tests only. This job cannot and does not establish live
+# Omarchy/Hyprland desktop acceptance; that is recorded manually in
+# VERIFICATION.md on real hardware.
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK4 + libadwaita dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev desktop-file-utils
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build workspace
+        run: cargo build --workspace --locked
+      - name: Unit tests (headless; core crates only prove logic, not desktop behavior)
+        run: cargo test --workspace --locked
+      - name: Validate desktop entry
+        run: desktop-file-validate packaging/co.think3.OmaScratch.desktop

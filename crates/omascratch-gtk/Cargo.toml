@@ -18,3 +18,4 @@ omascratch-theme.workspace = true
 gtk4.workspace = true
 libadwaita.workspace = true
 tracing.workspace = true
+kurbo.workspace = true

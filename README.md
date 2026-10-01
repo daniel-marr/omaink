@@ -4,9 +4,9 @@
 
 Ink-first notes for Omarchy: notebooks, folders and notes on an infinite canvas, built around fluid stylus input (pressure/tilt via Wayland tablet-v2), theme-adaptive to the active Omarchy theme, with a synced-folder-safe file format.
 
-Status: development scaffold with a minimal window; ink engine in progress.
+Status: in development; fluid stylus ink (pressure/tilt, undo/redo, pan/zoom) working on live Hyprland; persistence in progress.
 Intended Omarchy target: 4 / Hyprland; establish a supported range during implementation.
-Tested Omarchy versions: 4.0.4 (development machine only; see VERIFICATION.md). Live desktop acceptance: window mapping only — no feature acceptance yet.
+Tested Omarchy versions: 4.0.4 (development machine only; see VERIFICATION.md). Live desktop acceptance: window mapping and stylus ink verified on the dev machine; everything else not yet.
 
 ## Build and run
 

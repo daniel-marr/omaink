@@ -14,6 +14,17 @@ Run 2026-10-01 on the development machine (Omarchy 4.0.4, live Hyprland session)
 - `./target/debug/omascratch` launched in the live Hyprland session; `hyprctl clients` showed the window `mapped: 1`, `class: co.think3.OmaScratch`, `initialClass: co.think3.OmaScratch`, `xwayland: 0`. Window closed cleanly.
   - Note: GDK logged a Vulkan `VK_ERROR_INCOMPATIBLE_DRIVER` warning and fell back to the GL renderer on this machine. Track renderer choice when ink performance is measured.
 
+### M1 ink slice — live Hyprland acceptance (2026-10-01, user-performed)
+
+Hardware: XP-Pen Artist 15.6 Pro (kernel `uclogic`, Wayland tablet-v2), Omarchy 4.0.4 live session, debug overlay (`O`) observed by the user:
+
+- Pressure axis sweeps ~0.0→1.0 and stroke width follows it — confirmed.
+- Tilt axes report non-zero values when the pen is angled — confirmed.
+- Sample rate mid-stroke: ~210 samples/s (backlog draining active).
+- Subjective latency/feel: "looks and feels great"; no hooks/tails reported.
+- `cargo test --workspace` — exit 0 (10 passed: 7 core, 3 ink).
+- Stylus notes: this pen has no eraser end. A barrel button pans while hovering (compositor/driver mapping) but is inert while the tip is down — in-stroke button chords are app work, tracked for M4.
+
 ## Historical
 
 None.

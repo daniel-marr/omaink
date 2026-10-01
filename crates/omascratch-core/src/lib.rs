@@ -5,6 +5,12 @@
 
 pub mod color;
 pub mod id;
+pub mod note;
+pub mod session;
+pub mod stroke;
 
-pub use color::SemanticColor;
+pub use color::{Rgba, SemanticColor};
 pub use id::{FolderId, NotebookId, NoteId};
+pub use note::NoteContent;
+pub use session::{Command, NoteSession};
+pub use stroke::{InkPoint, Stroke, StrokeId, Tool};

@@ -477,6 +477,12 @@ struct Inner {
     mode: Cell<Mode>,
     /// Last non-eraser mode, restored when the barrel button toggles back.
     prev_mode: Cell<Mode>,
+    /// Pen-chip reordering: armed by long-press (or right-click drag),
+    /// source index while dragging, and a one-shot click suppressor so a
+    /// long-press that ends without a drag doesn't also select the pen.
+    reorder_armed: Cell<Option<usize>>,
+    drag_src: Cell<Option<usize>>,
+    suppress_click: Cell<bool>,
     gallery: gtk::Box,
     select_btn: gtk::Button,
     lasso_btn: gtk::Button,
@@ -532,6 +538,9 @@ impl Toolbar {
             on_background: RefCell::new(None),
             mode: Cell::new(Mode::Pen(st.active_pen.min(st.pens.len().saturating_sub(1)))),
             prev_mode: Cell::new(Mode::Pen(0)),
+            reorder_armed: Cell::new(None),
+            drag_src: Cell::new(None),
+            suppress_click: Cell::new(false),
             gallery: gtk::Box::new(gtk::Orientation::Horizontal, 1),
             select_btn: select_btn.clone(),
             lasso_btn: lasso_btn.clone(),
@@ -848,21 +857,152 @@ impl Toolbar {
             btn.add_css_class("pen-chip");
             btn.set_child(Some(&pen_glyph(cfg, rgba_of(&self.inner.canvas, cfg.color))));
             btn.set_tooltip_text(Some(match cfg.tool {
-                Tool::Pencil => "Pencil — click again for thickness & color",
-                Tool::Highlighter => "Highlighter — click again for thickness & color",
-                _ => "Pen — click again for thickness & color",
+                Tool::Pencil => "Pencil — click again for thickness & color · hold or right-click to drag",
+                Tool::Highlighter => "Highlighter — click again for thickness & color · hold or right-click to drag",
+                _ => "Pen — click again for thickness & color · hold or right-click to drag",
             }));
             let t = self.clone();
             btn.connect_clicked(move |b| {
+                if t.inner.suppress_click.replace(false) {
+                    return;
+                }
                 if t.inner.mode.get() == Mode::Pen(idx) {
                     t.open_pen_flyout(idx, b.clone().upcast());
                 } else {
                     t.set_mode(Mode::Pen(idx));
                 }
             });
+            self.attach_reorder(&btn, idx);
             g.append(&btn);
         }
         self.refresh_mode_styles();
+    }
+
+    // -- pen reordering (long-press + drag, or right-click drag) --
+
+    fn attach_reorder(&self, btn: &gtk::Button, idx: usize) {
+        // Long press arms the chip; it lifts to show it can be dragged now.
+        let long = gtk::GestureLongPress::new();
+        let t = self.clone();
+        let b = btn.clone();
+        long.connect_pressed(move |_, _, _| {
+            t.inner.reorder_armed.set(Some(idx));
+            t.inner.suppress_click.set(true);
+            b.add_css_class("pen-armed");
+        });
+        let t = self.clone();
+        let b = btn.clone();
+        long.connect_end(move |_, _| {
+            // Released without dragging: disarm (the drag path clears too).
+            if t.inner.drag_src.get().is_none() {
+                t.inner.reorder_armed.set(None);
+                b.remove_css_class("pen-armed");
+            }
+        });
+        btn.add_controller(long);
+
+        // Primary-button drag: only allowed once armed by the long press.
+        // Secondary-button (right-click) drag: always allowed.
+        for button in [gdk::BUTTON_PRIMARY, gdk::BUTTON_SECONDARY] {
+            let source = gtk::DragSource::new();
+            source.set_button(button);
+            source.set_actions(gdk::DragAction::MOVE);
+            let t = self.clone();
+            let b = btn.clone();
+            source.connect_prepare(move |src, _, _| {
+                let allowed = button == gdk::BUTTON_SECONDARY
+                    || t.inner.reorder_armed.get() == Some(idx);
+                if !allowed {
+                    return None;
+                }
+                t.inner.drag_src.set(Some(idx));
+                t.inner.suppress_click.set(false);
+                src.set_icon(Some(&gtk::WidgetPaintable::new(Some(&b))), 12, 20);
+                Some(gdk::ContentProvider::for_value(&"omascratch-pen".to_value()))
+            });
+            let t = self.clone();
+            let b = btn.clone();
+            source.connect_drag_end(move |_, _, _| {
+                t.inner.drag_src.set(None);
+                t.inner.reorder_armed.set(None);
+                b.remove_css_class("pen-armed");
+                t.clear_drop_marks();
+            });
+            btn.add_controller(source);
+        }
+
+        // Every pen chip is a drop target: left half = before, right = after.
+        let target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
+        let t = self.clone();
+        let b = btn.clone();
+        target.connect_motion(move |_, x, _| {
+            t.clear_drop_marks();
+            let after = x > b.width() as f64 / 2.0;
+            b.add_css_class(if after { "drop-after" } else { "drop-before" });
+            gdk::DragAction::MOVE
+        });
+        let t = self.clone();
+        target.connect_leave(move |_| t.clear_drop_marks());
+        let t = self.clone();
+        let b = btn.clone();
+        target.connect_drop(move |_, _, x, _| {
+            let Some(src) = t.inner.drag_src.take() else { return false };
+            let after = x > b.width() as f64 / 2.0;
+            t.inner.reorder_armed.set(None);
+            t.clear_drop_marks();
+            // Defer the rebuild: it destroys the widgets whose drag/drop
+            // signals are still on the stack.
+            let t2 = t.clone();
+            glib::idle_add_local_once(move || t2.move_pen(src, idx, after));
+            true
+        });
+        btn.add_controller(target);
+    }
+
+    fn clear_drop_marks(&self) {
+        let mut child = self.inner.gallery.first_child();
+        while let Some(w) = child {
+            w.remove_css_class("drop-before");
+            w.remove_css_class("drop-after");
+            child = w.next_sibling();
+        }
+    }
+
+    /// Move pen `src` next to pen `target` (before or after), keeping the
+    /// active pen (and the eraser-toggle return target) pointing at the same
+    /// pen after the shuffle.
+    fn move_pen(&self, src: usize, target: usize, after: bool) {
+        let len = self.inner.pens.borrow().len();
+        if src >= len || target >= len {
+            return;
+        }
+        let mut dst = if after { target + 1 } else { target };
+        if src < dst {
+            dst -= 1;
+        }
+        if dst == src {
+            return;
+        }
+        {
+            let mut pens = self.inner.pens.borrow_mut();
+            let pen = pens.remove(src);
+            pens.insert(dst, pen);
+        }
+        let remap = |i: usize| -> usize {
+            if i == src {
+                return dst;
+            }
+            let i = if i > src { i - 1 } else { i };
+            if i >= dst { i + 1 } else { i }
+        };
+        if let Mode::Pen(i) = self.inner.mode.get() {
+            self.inner.mode.set(Mode::Pen(remap(i)));
+        }
+        if let Mode::Pen(i) = self.inner.prev_mode.get() {
+            self.inner.prev_mode.set(Mode::Pen(remap(i)));
+        }
+        self.rebuild_gallery();
+        self.save();
     }
 
     // -- pen flyout (OneNote: preview, thickness, recent, colors, more, remove) --

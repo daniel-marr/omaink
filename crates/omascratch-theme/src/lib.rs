@@ -240,6 +240,11 @@ window {{
     min-width: 28px;
     padding: 2px;
 }}
+/* Near-square hover/press backgrounds on every toolbar button
+   (pens, tools, menu buttons, zoom, fullscreen). */
+.main-toolbar button {{
+    border-radius: 2px;
+}}
 .pen-chip {{
     padding: 1px 2px;
     margin: 0;
@@ -248,6 +253,15 @@ window {{
     background: none;
     border-bottom: 3px solid {accent};
     border-radius: 0;
+}}
+.pen-chip.pen-armed {{
+    opacity: 0.55;
+}}
+.pen-chip.drop-before {{
+    box-shadow: inset 3px 0 0 {accent};
+}}
+.pen-chip.drop-after {{
+    box-shadow: inset -3px 0 0 {accent};
 }}
 .mode-active {{
     background: none;

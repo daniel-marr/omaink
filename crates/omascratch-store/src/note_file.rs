@@ -1,0 +1,133 @@
+//! Reading and writing `.omanote` files: a zstd frame wrapping JSON.
+//! Missing, corrupt and newer-schema files produce typed errors; nothing is
+//! ever silently discarded or overwritten on read.
+
+use std::path::Path;
+
+use crate::atomic::atomic_write;
+use crate::error::{Result, StoreError};
+use crate::schema::{NoteDoc, NoteFileV1, NOTE_SCHEMA};
+
+pub const NOTE_EXT: &str = "omanote";
+const ZSTD_LEVEL: i32 = 3;
+
+pub fn write_note(path: &Path, doc: &NoteDoc, modified_ms: u64) -> Result<()> {
+    let file = doc.to_disk(modified_ms);
+    let json = serde_json::to_vec(&file)
+        .map_err(|e| StoreError::corrupt(path, format!("serialize: {e}")))?;
+    let compressed = zstd::encode_all(json.as_slice(), ZSTD_LEVEL)
+        .map_err(|e| StoreError::io(path, e))?;
+    atomic_write(path, &compressed)
+}
+
+pub fn read_note(path: &Path) -> Result<NoteDoc> {
+    let bytes = std::fs::read(path).map_err(|e| StoreError::io(path, e))?;
+    let json = zstd::decode_all(bytes.as_slice())
+        .map_err(|e| StoreError::corrupt(path, format!("zstd: {e}")))?;
+
+    // Check the schema number before committing to the full struct shape.
+    #[derive(serde::Deserialize)]
+    struct SchemaProbe {
+        schema: u32,
+    }
+    let probe: SchemaProbe = serde_json::from_slice(&json)
+        .map_err(|e| StoreError::corrupt(path, format!("json: {e}")))?;
+    if probe.schema > NOTE_SCHEMA {
+        return Err(StoreError::NewerSchema {
+            path: path.to_path_buf(),
+            found: probe.schema,
+            supported: NOTE_SCHEMA,
+        });
+    }
+    let file: NoteFileV1 = serde_json::from_slice(&json)
+        .map_err(|e| StoreError::corrupt(path, format!("schema {}: {e}", probe.schema)))?;
+    Ok(NoteDoc::from_disk(file))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omascratch_core::{InkPoint, NoteContent, NoteId, SemanticColor, Stroke, StrokeId, Tool};
+
+    fn doc() -> NoteDoc {
+        NoteDoc {
+            id: NoteId::new(),
+            title: "Test note".into(),
+            folder: None,
+            order_key: "a0".into(),
+            created_ms: 1_000,
+            modified_ms: 1_000,
+            content: NoteContent {
+                strokes: vec![Stroke {
+                    id: StrokeId::new(),
+                    tool: Tool::Pen,
+                    color: SemanticColor::Foreground,
+                    width: 3.5,
+                    t0_ms: 42,
+                    points: vec![
+                        InkPoint { x: 1.0, y: 2.0, pressure: 0.4, tilt_x: 0.1, tilt_y: -0.1, dt_ms: 0 },
+                        InkPoint { x: 3.0, y: 4.0, pressure: 0.9, tilt_x: 0.0, tilt_y: 0.0, dt_ms: 7 },
+                    ],
+                }],
+            },
+            opaque_elements: vec![],
+        }
+    }
+
+    #[test]
+    fn write_read_roundtrip_preserves_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("n.omanote");
+        let d = doc();
+        write_note(&p, &d, 2_000).unwrap();
+        let back = read_note(&p).unwrap();
+        assert_eq!(back.id, d.id);
+        assert_eq!(back.title, d.title);
+        assert_eq!(back.modified_ms, 2_000);
+        assert_eq!(back.content.strokes, d.content.strokes);
+    }
+
+    #[test]
+    fn corrupt_file_is_a_typed_error_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("broken.omanote");
+        std::fs::write(&p, b"this is not zstd").unwrap();
+        assert!(matches!(read_note(&p), Err(StoreError::Corrupt { .. })));
+
+        // Valid zstd, invalid JSON inside.
+        let garbage = zstd::encode_all(&b"not json"[..], 3).unwrap();
+        std::fs::write(&p, garbage).unwrap();
+        assert!(matches!(read_note(&p), Err(StoreError::Corrupt { .. })));
+    }
+
+    #[test]
+    fn newer_schema_is_refused_without_data_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("future.omanote");
+        let payload = serde_json::json!({ "schema": 99, "from": "the future" });
+        let bytes = zstd::encode_all(serde_json::to_vec(&payload).unwrap().as_slice(), 3).unwrap();
+        std::fs::write(&p, &bytes).unwrap();
+        assert!(matches!(
+            read_note(&p),
+            Err(StoreError::NewerSchema { found: 99, .. })
+        ));
+        // The file is untouched by the failed read.
+        assert_eq!(std::fs::read(&p).unwrap(), bytes);
+    }
+
+    #[test]
+    fn unknown_elements_round_trip_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("n.omanote");
+        let mut d = doc();
+        d.opaque_elements
+            .push(serde_json::json!({ "type": "hologram", "data": [1, 2, 3] }));
+        write_note(&p, &d, 1).unwrap();
+        let back = read_note(&p).unwrap();
+        assert_eq!(back.opaque_elements, d.opaque_elements);
+        // Write again and make sure it survives a second cycle too.
+        write_note(&p, &back, 2).unwrap();
+        let back2 = read_note(&p).unwrap();
+        assert_eq!(back2.opaque_elements, d.opaque_elements);
+    }
+}

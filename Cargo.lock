@@ -656,6 +656,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml 0.8.23",
+ "uuid",
  "zstd",
 ]
 

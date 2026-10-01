@@ -47,6 +47,9 @@ struct DebugStats {
 
 pub struct State {
     session: NoteSession,
+    /// Shell-installed hook, fired after every content change (used to
+    /// schedule autosave). Never called while `state` is borrowed.
+    on_change: Option<Box<dyn Fn()>>,
     /// World coordinate at the widget's top-left corner.
     offset: kurbo::Vec2,
     zoom: f64,
@@ -64,6 +67,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             session: NoteSession::default(),
+            on_change: None,
             offset: kurbo::Vec2::ZERO,
             zoom: 1.0,
             live: None,
@@ -157,6 +161,7 @@ impl CanvasView {
         let changed = self.imp().state.borrow_mut().session.undo();
         if changed {
             self.queue_draw();
+            self.notify_changed();
         }
     }
 
@@ -164,6 +169,45 @@ impl CanvasView {
         let changed = self.imp().state.borrow_mut().session.redo();
         if changed {
             self.queue_draw();
+            self.notify_changed();
+        }
+    }
+
+    /// Replace the canvas content (opening a note). Resets undo history and
+    /// the render cache; keeps the viewport.
+    pub fn set_content(&self, content: omascratch_core::NoteContent) {
+        let mut st = self.imp().state.borrow_mut();
+        st.session = NoteSession::new(content);
+        st.node_cache.clear();
+        st.live = None;
+        drop(st);
+        self.queue_draw();
+    }
+
+    /// Current revision + a clone of the content, for a generation-tagged save.
+    pub fn content_snapshot(&self) -> (u64, omascratch_core::NoteContent) {
+        let st = self.imp().state.borrow();
+        (st.session.revision(), st.session.content.clone())
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.imp().state.borrow().session.revision()
+    }
+
+    pub fn set_on_change(&self, f: impl Fn() + 'static) {
+        self.imp().state.borrow_mut().on_change = Some(Box::new(f));
+    }
+
+    fn notify_changed(&self) {
+        // Take the hook out of the RefCell so the callback can re-enter
+        // canvas methods (content_snapshot etc.) without a borrow panic.
+        let hook = self.imp().state.borrow_mut().on_change.take();
+        if let Some(hook) = hook {
+            hook();
+            let mut st = self.imp().state.borrow_mut();
+            if st.on_change.is_none() {
+                st.on_change = Some(hook);
+            }
         }
     }
 
@@ -434,6 +478,10 @@ impl CanvasView {
                 points: live.points,
             };
             st.session.dispatch(Command::AddStroke(stroke));
+            drop(st);
+            self.queue_draw();
+            self.notify_changed();
+            return;
         }
         drop(st);
         self.queue_draw();

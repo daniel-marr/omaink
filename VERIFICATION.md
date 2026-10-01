@@ -25,6 +25,17 @@ Hardware: XP-Pen Artist 15.6 Pro (kernel `uclogic`, Wayland tablet-v2), Omarchy 
 - `cargo test --workspace` — exit 0 (10 passed: 7 core, 3 ink).
 - Stylus notes: this pen has no eraser end. A barrel button pans while hovering (compositor/driver mapping) but is inert while the tip is down — in-stroke button chords are app work, tracked for M4.
 
+### M2 persistence — live Hyprland acceptance (2026-10-01)
+
+Omarchy 4.0.4 live session, user drawing with the XP-Pen, verified by inspecting the on-disk `.omanote` (zstd+JSON):
+
+- First-run creation: launching with no data created `~/.config/omascratch/settings.toml`, `~/Documents/OmaScratch/My Notebook/notebook.json`, and a first `.omanote` (schema 1, empty `elements`). Settings and notebook metadata are human-readable TOML/JSON as designed.
+- Clean-close save: drew 5 strokes, closed the window; final-save handler wrote all 5 strokes (9.3 KB note).
+- Reopen round-trip: strokes reloaded onto the canvas (user-confirmed).
+- Crash recovery cycle 1: drew more (19 elements on disk via debounced autosave), `kill -9` with no clean shutdown; reopen recovered all 19, no stale `.omatmp-*` debris.
+- Crash recovery cycle 2 (model-driven): 62 elements on disk, `kill -9`, disk still showed exactly 62 afterward, no stale temps, reopened cleanly.
+- `cargo test --workspace` — exit 0 (20 passed; store suite covers interrupted-write simulation, corrupt/newer-schema refusal, unknown-element round-trip, conflicted-copy detection, two-machine file-copy merge).
+
 ## Historical
 
 None.

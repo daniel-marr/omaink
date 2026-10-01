@@ -4,6 +4,7 @@ use gtk4::{gdk, glib};
 use libadwaita as adw;
 
 use crate::canvas::CanvasView;
+use crate::storage::Storage;
 use crate::APP_ID;
 
 pub fn run() -> glib::ExitCode {
@@ -16,6 +17,11 @@ pub fn run() -> glib::ExitCode {
 /// (sidebar, docked draw toolbar, breadcrumb) arrives in M3.
 fn build_window(app: &adw::Application) {
     let canvas = CanvasView::default();
+
+    // Open the most recent note (or create the first one) and wire autosave.
+    let storage = Storage::open_startup_note();
+    canvas.set_content(storage.doc.borrow().content.clone());
+    storage.attach_autosave(&canvas);
 
     let undo_btn = gtk::Button::from_icon_name("edit-undo-symbolic");
     undo_btn.set_tooltip_text(Some("Undo (Ctrl+Z)"));
@@ -74,6 +80,33 @@ fn build_window(app: &adw::Application) {
         }
     });
     window.add_controller(keys);
+
+    // Final save before the window goes away; on failure keep the window
+    // open and tell the user instead of silently losing ink.
+    let c = canvas.clone();
+    window.connect_close_request(move |win| {
+        match storage.save_final(&c) {
+            Ok(()) => glib::Propagation::Proceed,
+            Err(e) => {
+                let dialog = adw::AlertDialog::new(
+                    Some("Could not save your note"),
+                    Some(&format!("{e}\n\nClose anyway and lose the latest changes?")),
+                );
+                dialog.add_response("cancel", "Keep editing");
+                dialog.add_response("discard", "Close anyway");
+                dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+                dialog.set_default_response(Some("cancel"));
+                let win2 = win.clone();
+                dialog.connect_response(None, move |_, resp| {
+                    if resp == "discard" {
+                        win2.destroy();
+                    }
+                });
+                dialog.present(Some(win));
+                glib::Propagation::Stop
+            }
+        }
+    });
 
     window.present();
 }

@@ -1,0 +1,93 @@
+//! XDG base-directory split for the app. Per spec, a *relative* XDG env
+//! value is invalid and must be ignored in favor of the default.
+//!
+//! - config  (`~/.config/omascratch`): settings the user may edit/sync
+//! - state   (`~/.local/state/omascratch`): window geometry, last note, last-good theme
+//! - cache   (`~/.cache/omascratch`): thumbnails, disposable
+//! - user documents (default `~/Documents/OmaScratch`): the notebooks root —
+//!   user-owned files, never under `.local/share`, preserved on uninstall.
+
+use std::path::{Path, PathBuf};
+
+fn base(env_key: &str, home_rel_default: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+    match std::env::var_os(env_key).map(PathBuf::from) {
+        Some(p) if p.is_absolute() => p,
+        _ => home.join(home_rel_default),
+    }
+}
+
+pub fn config_dir() -> PathBuf {
+    base("XDG_CONFIG_HOME", ".config").join("omascratch")
+}
+
+pub fn state_dir() -> PathBuf {
+    base("XDG_STATE_HOME", ".local/state").join("omascratch")
+}
+
+pub fn cache_dir() -> PathBuf {
+    base("XDG_CACHE_HOME", ".cache").join("omascratch")
+}
+
+pub fn default_notebooks_root() -> PathBuf {
+    // XDG user dirs would need parsing user-dirs.dirs; Documents is the
+    // conventional default and the setting below can override it.
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+    home.join("Documents").join("OmaScratch")
+}
+
+/// App settings (config dir, TOML, versioned).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Settings {
+    pub schema: u32,
+    /// Where notebooks live. Point a sync client at this folder.
+    pub notebooks_root: PathBuf,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { schema: 1, notebooks_root: default_notebooks_root() }
+    }
+}
+
+impl Settings {
+    pub fn load_or_default(config_dir: &Path) -> Self {
+        let path = config_dir.join("settings.toml");
+        match std::fs::read_to_string(&path) {
+            Ok(text) => toml::from_str(&text).unwrap_or_else(|_| {
+                // Malformed settings: fall back to defaults but never
+                // overwrite the user's file behind their back.
+                Self::default()
+            }),
+            Err(_) => Self::default(),
+        }
+    }
+
+    pub fn save(&self, config_dir: &Path) -> crate::error::Result<()> {
+        std::fs::create_dir_all(config_dir)
+            .map_err(|e| crate::error::StoreError::io(config_dir, e))?;
+        let path = config_dir.join("settings.toml");
+        let text = toml::to_string_pretty(self)
+            .map_err(|e| crate::error::StoreError::corrupt(&path, e.to_string()))?;
+        crate::atomic::atomic_write(&path, text.as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_roundtrip_and_malformed_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        s.notebooks_root = PathBuf::from("/tmp/nb");
+        s.save(dir.path()).unwrap();
+        let back = Settings::load_or_default(dir.path());
+        assert_eq!(back.notebooks_root, PathBuf::from("/tmp/nb"));
+
+        std::fs::write(dir.path().join("settings.toml"), "not = [valid").unwrap();
+        let fallback = Settings::load_or_default(dir.path());
+        assert_eq!(fallback.notebooks_root, default_notebooks_root());
+    }
+}

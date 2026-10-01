@@ -19,3 +19,4 @@ gtk4.workspace = true
 libadwaita.workspace = true
 tracing.workspace = true
 kurbo.workspace = true
+uuid.workspace = true

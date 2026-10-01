@@ -8,6 +8,7 @@
 
 pub mod atomic;
 pub mod error;
+pub mod library;
 pub mod note_file;
 pub mod notebook;
 pub mod schema;
@@ -19,5 +20,9 @@ pub use notebook::{
     create_notebook, is_conflict_name, note_path, scan_notebook, scan_root, FolderMeta,
     NotebookMeta, NotebookTree, NoteEntry,
 };
+pub use library::{
+    create_folder, create_note, delete_folder, delete_note, order_between, reload_notebook,
+    rename_folder, rename_note, set_folder_order, set_note_order,
+};
 pub use schema::{NoteDoc, NOTE_SCHEMA};
-pub use xdg::{cache_dir, config_dir, default_notebooks_root, state_dir, Settings};
+pub use xdg::{cache_dir, config_dir, default_notebooks_root, state_dir, Settings, ViewState};

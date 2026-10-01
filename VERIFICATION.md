@@ -36,6 +36,18 @@ Omarchy 4.0.4 live session, user drawing with the XP-Pen, verified by inspecting
 - Crash recovery cycle 2 (model-driven): 62 elements on disk, `kill -9`, disk still showed exactly 62 afterward, no stale temps, reopened cleanly.
 - `cargo test --workspace` — exit 0 (20 passed; store suite covers interrupted-write simulation, corrupt/newer-schema refusal, unknown-element round-trip, conflicted-copy detection, two-machine file-copy merge).
 
+### M3 organization UI — live Hyprland acceptance (2026-10-01, user-verified)
+
+Obsidian-style sidebar on the live session; verified interactively by the user:
+
+- Notebook → Folders (nestable) → Notes tree; single-click opens a note, single-click toggles folder collapse.
+- Create/rename/delete of notebooks, folders and notes; rename works inline (double-click), via the ⋯ menu, and on the canvas title — two-way synced (sidebar ↔ canvas). Renaming the open note routes through storage (synchronous title write) so autosave cannot revert it.
+- Drag-and-drop: note into folder, note reorder, folder reorder/nest — all via fractional order keys (only the moved item's file is rewritten).
+- Collapsed-folder state persists across restarts (`~/.local/state/omascratch/view.json`).
+- Chrome: no window title bar; full-width top toolbar (reserved for M4 draw tools) matching the sidebar; on-canvas editable page title; fullscreen-canvas toggle (button + F11); F9 toggles sidebar.
+- A use-after-free crash (rebuilding the list inside a row widget's own signal) was found and fixed by deferring rebuilds to an idle tick; confirmed stable afterward.
+- `cargo test --workspace` — exit 0 (32 passed: core incl. 5 fractional-order tests, ink, store incl. library CRUD + view-state + conflicted-copy + interrupted-write).
+
 ## Historical
 
 None.

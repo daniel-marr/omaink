@@ -3,7 +3,10 @@
 
 mod app;
 mod canvas;
+mod library;
+mod sidebar;
 mod storage;
+mod theme;
 
 /// Must equal the Wayland app_id, the .desktop basename and the icon basename.
 pub const APP_ID: &str = "co.think3.OmaScratch";

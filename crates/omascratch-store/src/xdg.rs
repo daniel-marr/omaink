@@ -73,9 +73,48 @@ impl Settings {
     }
 }
 
+/// Per-viewer UI state (collapsed folders, …). Lives in the XDG state dir,
+/// never in the synced notebooks tree.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ViewState {
+    #[serde(default)]
+    pub collapsed_folders: Vec<uuid::Uuid>,
+}
+
+impl ViewState {
+    pub fn load(state_dir: &Path) -> Self {
+        std::fs::read_to_string(state_dir.join("view.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, state_dir: &Path) -> crate::error::Result<()> {
+        std::fs::create_dir_all(state_dir)
+            .map_err(|e| crate::error::StoreError::io(state_dir, e))?;
+        let path = state_dir.join("view.json");
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|e| crate::error::StoreError::corrupt(&path, e.to_string()))?;
+        crate::atomic::atomic_write(&path, &bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_state_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::now_v7();
+        let vs = ViewState { collapsed_folders: vec![id] };
+        vs.save(dir.path()).unwrap();
+        let back = ViewState::load(dir.path());
+        assert_eq!(back.collapsed_folders, vec![id]);
+        // Missing file → default (empty), not an error.
+        let empty = ViewState::load(tempfile::tempdir().unwrap().path());
+        assert!(empty.collapsed_folders.is_empty());
+    }
 
     #[test]
     fn settings_roundtrip_and_malformed_fallback() {

@@ -630,6 +630,7 @@ dependencies = [
  "omascratch-store",
  "omascratch-theme",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -21,8 +21,8 @@ pub use notebook::{
     NotebookMeta, NotebookTree, NoteEntry,
 };
 pub use library::{
-    create_folder, create_note, delete_folder, delete_note, order_between, reload_notebook,
-    rename_folder, rename_note, set_folder_order, set_note_order,
+    create_folder, create_note, delete_folder, delete_note, delete_notebook, order_between,
+    reload_notebook, rename_folder, rename_note, rename_notebook, set_folder_order, set_note_order,
 };
 pub use schema::{NoteDoc, NOTE_SCHEMA};
 pub use xdg::{cache_dir, config_dir, default_notebooks_root, state_dir, Settings, ViewState};

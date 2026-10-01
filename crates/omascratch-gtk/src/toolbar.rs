@@ -1,0 +1,1407 @@
+//! OneNote fluid-style Draw toolbar.
+//!
+//! Layout: undo/redo │ Select, Lasso │ [eraser chip][pen chips…] + Add Pen ▾ │
+//! Shapes ▾, Format Background ▾, ⋯ (the right-side group is stubbed until
+//! shapes/M5 land). One mode is active at a time across select/lasso/eraser/
+//! pens. Clicking the active pen or eraser chip opens its OneNote-style
+//! flyout (stroke preview, − dots +, Recent Colors, Colors grid, More Colors,
+//! Remove Pen / eraser types). The pen set persists in XDG state.
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use gtk4 as gtk;
+use gtk4::{gdk, glib, prelude::*};
+
+use omascratch_core::{Rgba, SemanticColor, Tool};
+use omascratch_store as store;
+
+use crate::canvas::{ActiveTool, CanvasView, EraserKind};
+use omascratch_core::{BackgroundKind, PageBackground};
+use omascratch_ink::ShapeKind;
+
+
+const STATE_FILE: &str = "toolbar.json";
+
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+struct PenCfg {
+    tool: Tool,
+    color: SemanticColor,
+    width: f64,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct ToolbarState {
+    schema: u32,
+    pens: Vec<PenCfg>,
+    active_pen: usize,
+    eraser_area: bool,
+    eraser_radius: f64,
+    recent: Vec<SemanticColor>,
+    #[serde(default = "default_shape_color")]
+    shape_color: SemanticColor,
+    #[serde(default = "default_shape_width")]
+    shape_width: f64,
+    #[serde(default)]
+    canvas_inverted: bool,
+}
+
+fn default_shape_color() -> SemanticColor {
+    SemanticColor::Foreground
+}
+fn default_shape_width() -> f64 {
+    3.0
+}
+
+impl Default for ToolbarState {
+    fn default() -> Self {
+        Self {
+            schema: 1,
+            pens: default_pens(),
+            active_pen: 0,
+            eraser_area: false,
+            eraser_radius: 16.0,
+            recent: Vec::new(),
+            shape_color: default_shape_color(),
+            shape_width: default_shape_width(),
+            canvas_inverted: false,
+        }
+    }
+}
+
+fn fixed(r: f32, g: f32, b: f32) -> SemanticColor {
+    SemanticColor::Fixed(Rgba { r, g, b, a: 1.0 })
+}
+
+fn default_pens() -> Vec<PenCfg> {
+    vec![
+        PenCfg { tool: Tool::Pen, color: SemanticColor::Foreground, width: 3.5 },
+        PenCfg { tool: Tool::Pen, color: fixed(0.90, 0.30, 0.35), width: 3.5 },
+        PenCfg { tool: Tool::Pen, color: fixed(0.42, 0.62, 0.96), width: 3.5 },
+        PenCfg { tool: Tool::Pencil, color: SemanticColor::Foreground, width: 2.0 },
+        PenCfg { tool: Tool::Highlighter, color: fixed(0.98, 0.84, 0.25), width: 16.0 },
+    ]
+}
+
+/// OneNote's Colors grid, arranged by hue family, 5 per row.
+fn color_rows() -> Vec<Vec<(&'static str, SemanticColor)>> {
+    vec![
+        vec![
+            ("Yellow", fixed(0.98, 0.84, 0.25)),
+            ("Amber", fixed(0.96, 0.69, 0.22)),
+            ("Orange", fixed(0.95, 0.56, 0.24)),
+            ("Vermilion", fixed(0.93, 0.42, 0.26)),
+            ("Red", fixed(0.90, 0.30, 0.35)),
+        ],
+        vec![
+            ("Magenta", fixed(0.87, 0.33, 0.62)),
+            ("Pink", fixed(0.93, 0.47, 0.73)),
+            ("Purple", fixed(0.73, 0.60, 0.97)),
+            ("Violet", fixed(0.56, 0.44, 0.86)),
+            ("Indigo", fixed(0.42, 0.38, 0.80)),
+        ],
+        vec![
+            ("Blue", fixed(0.42, 0.62, 0.96)),
+            ("Azure", fixed(0.30, 0.71, 0.92)),
+            ("Cyan", fixed(0.31, 0.78, 0.84)),
+            ("Teal", fixed(0.33, 0.78, 0.76)),
+            ("Sea green", fixed(0.30, 0.74, 0.59)),
+        ],
+        vec![
+            ("Green", fixed(0.55, 0.78, 0.35)),
+            ("Lime", fixed(0.71, 0.84, 0.33)),
+            ("Olive", fixed(0.60, 0.62, 0.35)),
+            ("Brown", fixed(0.65, 0.48, 0.34)),
+            ("Tan", fixed(0.78, 0.65, 0.50)),
+        ],
+        vec![
+            ("Black", fixed(0.08, 0.08, 0.10)),
+            ("Dark grey", fixed(0.32, 0.34, 0.40)),
+            ("Grey", fixed(0.55, 0.57, 0.63)),
+            ("White", fixed(0.95, 0.96, 0.98)),
+            ("Theme ink", SemanticColor::Foreground),
+        ],
+        vec![
+            ("Pastel pink", fixed(0.96, 0.75, 0.79)),
+            ("Pastel yellow", fixed(0.97, 0.91, 0.69)),
+            ("Pastel blue", fixed(0.74, 0.84, 0.97)),
+            ("Pastel green", fixed(0.78, 0.92, 0.78)),
+            ("Accent", SemanticColor::Accent),
+        ],
+    ]
+}
+
+/// Resolve a semantic color against the live canvas palette.
+fn rgba_of(canvas: &CanvasView, c: SemanticColor) -> gdk::RGBA {
+    canvas.preview_rgba(c)
+}
+
+// ---- drawn glyphs (no icon-theme dependency) ----
+
+fn set_source(cr: &gtk::cairo::Context, c: gdk::RGBA, alpha: f64) {
+    cr.set_source_rgba(c.red() as f64, c.green() as f64, c.blue() as f64, alpha);
+}
+
+/// Pen chips: dark barrel pointing down with a colored band and nib.
+/// Highlighters are chisel-tipped; pencils get a wood collar.
+fn pen_glyph(cfg: PenCfg, rgba: gdk::RGBA) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(26);
+    area.set_content_height(44);
+    area.set_draw_func(move |_, cr, w, h| {
+        let w = w as f64;
+        let h = h as f64;
+        let cx = w / 2.0;
+        let set = |cr: &gtk::cairo::Context| {
+            cr.set_source_rgba(rgba.red() as f64, rgba.green() as f64, rgba.blue() as f64, 1.0)
+        };
+        match cfg.tool {
+            Tool::Highlighter => {
+                let bw = w * 0.62;
+                cr.set_source_rgb(0.18, 0.19, 0.25);
+                rounded_rect(cr, cx - bw / 2.0, h * 0.18, bw, h * 0.52, 2.5);
+                let _ = cr.fill();
+                set(cr);
+                cr.rectangle(cx - bw / 2.0 + 2.0, h * 0.30, bw - 4.0, h * 0.16);
+                let _ = cr.fill();
+                set(cr);
+                cr.move_to(cx - bw / 2.0, h * 0.70);
+                cr.line_to(cx + bw / 2.0, h * 0.70);
+                cr.line_to(cx + bw * 0.28, h * 0.94);
+                cr.line_to(cx - bw * 0.28, h * 0.94);
+                cr.close_path();
+                let _ = cr.fill();
+            }
+            Tool::Pencil => {
+                let bw = w * 0.40;
+                cr.set_source_rgb(0.18, 0.19, 0.25);
+                rounded_rect(cr, cx - bw / 2.0, h * 0.06, bw, h * 0.56, 2.0);
+                let _ = cr.fill();
+                cr.set_source_rgb(0.82, 0.68, 0.46);
+                cr.move_to(cx - bw / 2.0, h * 0.62);
+                cr.line_to(cx + bw / 2.0, h * 0.62);
+                cr.line_to(cx, h * 0.96);
+                cr.close_path();
+                let _ = cr.fill();
+                set(cr);
+                cr.move_to(cx - bw * 0.18, h * 0.84);
+                cr.line_to(cx + bw * 0.18, h * 0.84);
+                cr.line_to(cx, h * 0.96);
+                cr.close_path();
+                let _ = cr.fill();
+            }
+            Tool::Pen | Tool::Shape => {
+                let bw = w * 0.40;
+                cr.set_source_rgb(0.18, 0.19, 0.25);
+                rounded_rect(cr, cx - bw / 2.0, h * 0.06, bw, h * 0.56, 2.0);
+                let _ = cr.fill();
+                set(cr);
+                cr.rectangle(cx - bw / 2.0, h * 0.50, bw, h * 0.10);
+                let _ = cr.fill();
+                cr.set_source_rgb(0.30, 0.31, 0.38);
+                cr.move_to(cx - bw / 2.0, h * 0.62);
+                cr.line_to(cx + bw / 2.0, h * 0.62);
+                cr.line_to(cx, h * 0.92);
+                cr.close_path();
+                let _ = cr.fill();
+                set(cr);
+                cr.move_to(cx - bw * 0.20, h * 0.80);
+                cr.line_to(cx + bw * 0.20, h * 0.80);
+                cr.line_to(cx, h * 0.97);
+                cr.close_path();
+                let _ = cr.fill();
+            }
+        }
+    });
+    area
+}
+
+/// Eraser: a bold angled rubber with a pink working band and two motion
+/// ticks at the tip.
+fn eraser_glyph() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(26);
+    area.set_content_height(44);
+    area.set_draw_func(|_, cr, w, h| {
+        let w = w as f64;
+        let h = h as f64;
+        let _ = cr.save();
+        cr.translate(w * 0.52, h * 0.50);
+        cr.rotate(-0.52);
+        let bw = w * 0.88;
+        let bh = h * 0.30;
+        cr.set_source_rgb(0.91, 0.92, 0.96);
+        rounded_rect(cr, -bw / 2.0, -bh / 2.0, bw, bh, 5.0);
+        let _ = cr.fill();
+        cr.set_source_rgb(0.93, 0.52, 0.63);
+        rounded_rect(cr, -bw / 2.0, -bh / 2.0, bw * 0.34, bh, 5.0);
+        let _ = cr.fill();
+        cr.set_source_rgba(0.2, 0.21, 0.28, 0.8);
+        cr.set_line_width(1.1);
+        cr.move_to(-bw / 2.0 + bw * 0.34, -bh / 2.0);
+        cr.line_to(-bw / 2.0 + bw * 0.34, bh / 2.0);
+        let _ = cr.stroke();
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.3);
+        cr.set_line_width(1.0);
+        rounded_rect(cr, -bw / 2.0, -bh / 2.0, bw, bh, 5.0);
+        let _ = cr.stroke();
+        let _ = cr.restore();
+        cr.set_source_rgba(0.62, 0.67, 0.84, 0.85);
+        cr.set_line_width(1.6);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.move_to(w * 0.10, h * 0.78);
+        cr.line_to(w * 0.26, h * 0.78);
+        let _ = cr.stroke();
+        cr.move_to(w * 0.06, h * 0.88);
+        cr.line_to(w * 0.18, h * 0.88);
+        let _ = cr.stroke();
+    });
+    area
+}
+
+/// Hand (pan) icon: a simple mitten-style hand.
+fn hand_glyph() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(22);
+    area.set_content_height(22);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(|_, cr, w, h| {
+        let w = w as f64;
+        let h = h as f64;
+        cr.set_source_rgb(0.78, 0.82, 0.96);
+        // Palm.
+        rounded_rect(cr, w * 0.26, h * 0.42, w * 0.46, h * 0.40, 5.0);
+        let _ = cr.fill();
+        // Four fingers.
+        for (i, (fx, fh)) in [(0.28, 0.26), (0.40, 0.18), (0.52, 0.16), (0.64, 0.24)].iter().enumerate() {
+            let _ = i;
+            rounded_rect(cr, w * fx, h * fh, w * 0.10, h * (0.42 - fh) + h * 0.06, 2.5);
+            let _ = cr.fill();
+        }
+        // Thumb.
+        let _ = cr.save();
+        cr.translate(w * 0.20, h * 0.58);
+        cr.rotate(0.6);
+        rounded_rect(cr, -w * 0.05, -h * 0.05, w * 0.11, h * 0.26, 2.5);
+        let _ = cr.fill();
+        let _ = cr.restore();
+    });
+    area
+}
+
+/// Format-background icon: a mini ruled page with a margin line.
+fn ruled_page_glyph() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(22);
+    area.set_content_height(22);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(|_, cr, w, h| {
+        let w = w as f64;
+        let h = h as f64;
+        // Page outline.
+        cr.set_source_rgba(0.78, 0.82, 0.96, 0.9);
+        cr.set_line_width(1.3);
+        rounded_rect(cr, w * 0.12, h * 0.08, w * 0.76, h * 0.84, 2.5);
+        let _ = cr.stroke();
+        // Rule lines.
+        cr.set_line_width(1.1);
+        cr.set_source_rgba(0.62, 0.67, 0.84, 0.8);
+        for i in 1..=3 {
+            let y = h * (0.22 + 0.20 * i as f64);
+            cr.move_to(w * 0.20, y);
+            cr.line_to(w * 0.80, y);
+            let _ = cr.stroke();
+        }
+        // Red margin line.
+        cr.set_source_rgba(0.93, 0.45, 0.53, 0.95);
+        cr.move_to(w * 0.30, h * 0.12);
+        cr.line_to(w * 0.30, h * 0.88);
+        let _ = cr.stroke();
+    });
+    area
+}
+
+/// Shapes toolbar icon: overlapping square + circle.
+fn shapes_glyph() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(22);
+    area.set_content_height(22);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(|_, cr, w, h| {
+        let w = w as f64;
+        let h = h as f64;
+        cr.set_source_rgb(0.78, 0.82, 0.96);
+        cr.set_line_width(1.5);
+        cr.rectangle(w * 0.12, h * 0.12, w * 0.52, h * 0.52);
+        let _ = cr.stroke();
+        cr.arc(w * 0.62, h * 0.62, w * 0.26, 0.0, std::f64::consts::TAU);
+        let _ = cr.stroke();
+    });
+    area
+}
+
+/// Half-dark / half-light circle: invert the canvas theme.
+fn invert_glyph() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(22);
+    area.set_content_height(22);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(|_, cr, w, h| {
+        let w = w as f64;
+        let h = h as f64;
+        let r = w.min(h) * 0.38;
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        cr.set_source_rgb(0.90, 0.91, 0.95);
+        cr.arc(cx, cy, r, std::f64::consts::FRAC_PI_2, 3.0 * std::f64::consts::FRAC_PI_2);
+        let _ = cr.fill();
+        cr.set_source_rgb(0.30, 0.32, 0.42);
+        cr.arc(cx, cy, r, -std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+        let _ = cr.fill();
+        cr.set_source_rgb(0.78, 0.82, 0.96);
+        cr.set_line_width(1.3);
+        cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
+        let _ = cr.stroke();
+    });
+    area
+}
+
+fn select_glyph() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(22);
+    area.set_content_height(22);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(|_, cr, w, h| {
+        // Classic cursor arrow, recentered from its own bounding box.
+        let pts: [(f64, f64); 7] = [
+            (0.30, 0.06),
+            (0.30, 0.78),
+            (0.46, 0.62),
+            (0.57, 0.88),
+            (0.68, 0.83),
+            (0.56, 0.58),
+            (0.76, 0.58),
+        ];
+        let (minx, maxx) = (0.30, 0.76);
+        let (miny, maxy) = (0.06, 0.88);
+        let dx = 0.5 - (minx + maxx) / 2.0;
+        let dy = 0.5 - (miny + maxy) / 2.0;
+        let s = w.min(h) as f64;
+        cr.set_source_rgb(0.78, 0.82, 0.96);
+        cr.move_to((pts[0].0 + dx) * s, (pts[0].1 + dy) * s);
+        for p in &pts[1..] {
+            cr.line_to((p.0 + dx) * s, (p.1 + dy) * s);
+        }
+        cr.close_path();
+        let _ = cr.fill();
+    });
+    area
+}
+
+fn lasso_glyph() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(22);
+    area.set_content_height(22);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(|_, cr, w, h| {
+        let w = w as f64;
+        let h = h as f64;
+        cr.set_source_rgb(0.78, 0.82, 0.96);
+        cr.set_line_width(1.5);
+        // Closed dashed loop, centered.
+        cr.set_dash(&[2.6, 2.2], 0.0);
+        let _ = cr.save();
+        cr.translate(w / 2.0, h / 2.0);
+        cr.scale(1.0, 0.78);
+        cr.arc(0.0, 0.0, w * 0.36, 0.0, std::f64::consts::TAU);
+        let _ = cr.stroke();
+        let _ = cr.restore();
+        // Solid knot sitting ON the loop (bottom-right) — no floating tail.
+        cr.set_dash(&[], 0.0);
+        let kx = w / 2.0 + w * 0.36 * 0.707;
+        let ky = h / 2.0 + h * 0.78 * 0.36 * 0.707;
+        cr.arc(kx, ky, 2.2, 0.0, std::f64::consts::TAU);
+        let _ = cr.fill();
+    });
+    area
+}
+
+fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+    cr.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+    cr.arc(x + r, y + r, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+    cr.close_path();
+}
+
+fn color_swatch(color: gdk::RGBA, size: i32) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(size);
+    area.set_content_height(size);
+    area.set_draw_func(move |_, cr, w, h| {
+        set_source(cr, color, color.alpha() as f64);
+        rounded_rect(cr, 0.5, 0.5, w as f64 - 1.0, h as f64 - 1.0, 4.0);
+        let _ = cr.fill();
+    });
+    area
+}
+
+// ---- the toolbar ----
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Select,
+    Lasso,
+    Eraser,
+    Pen(usize),
+    Shape(ShapeKind),
+    Pan,
+}
+
+struct Inner {
+    canvas: CanvasView,
+    pens: RefCell<Vec<PenCfg>>,
+    recent: RefCell<Vec<SemanticColor>>,
+    eraser_area: Cell<bool>,
+    eraser_radius: Cell<f64>,
+    shape_color: RefCell<SemanticColor>,
+    shape_width: Cell<f64>,
+    last_shape: Cell<ShapeKind>,
+    on_background: RefCell<Option<Box<dyn Fn(PageBackground)>>>,
+    mode: Cell<Mode>,
+    /// Last non-eraser mode, restored when the barrel button toggles back.
+    prev_mode: Cell<Mode>,
+    gallery: gtk::Box,
+    select_btn: gtk::Button,
+    lasso_btn: gtk::Button,
+    pan_btn: gtk::Button,
+    shapes_btn: gtk::MenuButton,
+}
+
+#[derive(Clone)]
+pub struct Toolbar {
+    pub widget: gtk::Box,
+    inner: Rc<Inner>,
+}
+
+pub fn build(canvas: &CanvasView) -> Toolbar {
+    Toolbar::new(canvas)
+}
+
+impl Toolbar {
+    fn new(canvas: &CanvasView) -> Toolbar {
+        let st = load_state();
+
+        let widget = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        widget.add_css_class("draw-toolbar");
+        widget.set_margin_start(8);
+        widget.set_valign(gtk::Align::Center);
+
+        let select_btn = gtk::Button::new();
+        select_btn.add_css_class("flat");
+        select_btn.set_child(Some(&select_glyph()));
+        select_btn.set_tooltip_text(Some("Select"));
+        let lasso_btn = gtk::Button::new();
+        lasso_btn.add_css_class("flat");
+        lasso_btn.set_child(Some(&lasso_glyph()));
+        lasso_btn.set_tooltip_text(Some("Lasso select"));
+        let pan_btn = gtk::Button::new();
+        pan_btn.add_css_class("flat");
+        pan_btn.set_child(Some(&hand_glyph()));
+        pan_btn.set_tooltip_text(Some("Pan canvas (hand)"));
+        let shapes_btn = gtk::MenuButton::new();
+        shapes_btn.add_css_class("flat");
+        shapes_btn.set_child(Some(&shapes_glyph()));
+        shapes_btn.set_tooltip_text(Some("Shapes"));
+
+        let inner = Rc::new(Inner {
+            canvas: canvas.clone(),
+            pens: RefCell::new(st.pens.clone()),
+            recent: RefCell::new(st.recent.clone()),
+            eraser_area: Cell::new(st.eraser_area),
+            eraser_radius: Cell::new(st.eraser_radius),
+            shape_color: RefCell::new(st.shape_color),
+            shape_width: Cell::new(st.shape_width),
+            last_shape: Cell::new(ShapeKind::Line),
+            on_background: RefCell::new(None),
+            mode: Cell::new(Mode::Pen(st.active_pen.min(st.pens.len().saturating_sub(1)))),
+            prev_mode: Cell::new(Mode::Pen(0)),
+            gallery: gtk::Box::new(gtk::Orientation::Horizontal, 1),
+            select_btn: select_btn.clone(),
+            lasso_btn: lasso_btn.clone(),
+            pan_btn: pan_btn.clone(),
+            shapes_btn: shapes_btn.clone(),
+        });
+        let tb = Toolbar { widget, inner };
+
+        // Undo / redo.
+        let undo = gtk::Button::from_icon_name("edit-undo-symbolic");
+        undo.add_css_class("flat");
+        undo.set_tooltip_text(Some("Undo (Ctrl+Z)"));
+        let c = canvas.clone();
+        undo.connect_clicked(move |_| c.undo());
+        let redo = gtk::Button::from_icon_name("edit-redo-symbolic");
+        redo.add_css_class("flat");
+        redo.set_tooltip_text(Some("Redo (Ctrl+Shift+Z)"));
+        let c = canvas.clone();
+        redo.connect_clicked(move |_| c.redo());
+        tb.widget.append(&undo);
+        tb.widget.append(&redo);
+        tb.widget.append(&vsep());
+
+        // Select + Lasso.
+        {
+            let t = tb.clone();
+            select_btn.connect_clicked(move |_| t.set_mode(Mode::Select));
+        }
+        {
+            let t = tb.clone();
+            lasso_btn.connect_clicked(move |_| t.set_mode(Mode::Lasso));
+        }
+        {
+            let t = tb.clone();
+            pan_btn.connect_clicked(move |_| t.set_mode(Mode::Pan));
+        }
+        tb.widget.append(&select_btn);
+        tb.widget.append(&pan_btn);
+        tb.widget.append(&lasso_btn);
+        let copy_btn = gtk::Button::from_icon_name("edit-copy-symbolic");
+        copy_btn.add_css_class("flat");
+        copy_btn.set_tooltip_text(Some("Copy selection (Ctrl+C)"));
+        let c = canvas.clone();
+        copy_btn.connect_clicked(move |_| {
+            c.copy_selection();
+        });
+        let paste_btn = gtk::Button::from_icon_name("edit-paste-symbolic");
+        paste_btn.add_css_class("flat");
+        paste_btn.set_tooltip_text(Some("Paste (Ctrl+V)"));
+        let c = canvas.clone();
+        paste_btn.connect_clicked(move |_| c.paste_clipboard());
+        tb.widget.append(&copy_btn);
+        tb.widget.append(&paste_btn);
+        tb.widget.append(&vsep());
+
+        // Gallery: eraser chip first, then pens.
+        tb.widget.append(&tb.inner.gallery);
+
+        // Add Pen ▾.
+        let add_pen = gtk::MenuButton::new();
+        add_pen.add_css_class("flat");
+        add_pen.set_icon_name("list-add-symbolic");
+        add_pen.set_tooltip_text(Some("Add pen"));
+        let pop = gtk::Popover::new();
+        let vb = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        vb.set_margin_top(4);
+        vb.set_margin_bottom(4);
+        vb.set_margin_start(4);
+        vb.set_margin_end(4);
+        for (label, tool, color, width) in [
+            ("Pen", Tool::Pen, SemanticColor::Foreground, 3.5),
+            ("Pencil", Tool::Pencil, SemanticColor::Foreground, 2.0),
+            ("Highlighter", Tool::Highlighter, fixed(0.98, 0.84, 0.25), 16.0),
+        ] {
+            let b = gtk::Button::with_label(label);
+            b.add_css_class("flat");
+            if let Some(l) = b.child().and_downcast::<gtk::Label>() {
+                l.set_xalign(0.0);
+            }
+            let t = tb.clone();
+            let p = pop.clone();
+            b.connect_clicked(move |_| {
+                t.inner.pens.borrow_mut().push(PenCfg { tool, color, width });
+                let idx = t.inner.pens.borrow().len() - 1;
+                t.rebuild_gallery();
+                t.set_mode(Mode::Pen(idx));
+                t.save();
+                p.popdown();
+            });
+            vb.append(&b);
+        }
+        pop.set_child(Some(&vb));
+        add_pen.set_popover(Some(&pop));
+        tb.widget.append(&add_pen);
+        tb.widget.append(&vsep());
+
+        // Right-side group: Shapes ▾ / Format Background ▾ / ⋯ — present,
+        // wired to "coming soon" popovers until shapes and M5 land.
+        // Shapes ▾ — rebuilt each open: shape kind + thickness + colors.
+        {
+            let t = tb.clone();
+            shapes_btn.set_create_popup_func(move |btn| {
+                let pop = t.build_shapes_popover();
+                btn.set_popover(Some(&pop));
+            });
+            tb.widget.append(&shapes_btn);
+        }
+        // Format Background ▾ — rule/grid lines, margin.
+        let bg_btn = gtk::MenuButton::new();
+        bg_btn.add_css_class("flat");
+        bg_btn.set_child(Some(&ruled_page_glyph()));
+        bg_btn.set_tooltip_text(Some("Format background"));
+        {
+            let t = tb.clone();
+            bg_btn.set_create_popup_func(move |btn| {
+                btn.set_popover(Some(&t.build_background_popover()));
+            });
+        }
+        tb.widget.append(&bg_btn);
+
+        // Invert canvas light/dark.
+        let invert_btn = gtk::Button::new();
+        invert_btn.add_css_class("flat");
+        invert_btn.set_child(Some(&invert_glyph()));
+        invert_btn.set_tooltip_text(Some("Invert canvas (light/dark page)"));
+        {
+            let t = tb.clone();
+            invert_btn.connect_clicked(move |_| {
+                let now = !t.inner.canvas.inverted();
+                t.inner.canvas.set_inverted(now);
+                t.save();
+            });
+        }
+        tb.widget.append(&invert_btn);
+
+
+        tb.rebuild_gallery();
+        canvas.set_inverted(st.canvas_inverted);
+        // Apply the restored mode.
+        tb.set_mode(tb.inner.mode.get());
+        tb
+    }
+
+    /// Stylus barrel button: flip between the eraser and the previous tool.
+    pub fn toggle_eraser(&self) {
+        if self.inner.mode.get() == Mode::Eraser {
+            self.set_mode(self.inner.prev_mode.get());
+        } else {
+            self.set_mode(Mode::Eraser);
+        }
+    }
+
+    /// Re-render palette-dependent glyphs after a theme change.
+    pub fn refresh_theme(&self) {
+        self.rebuild_gallery();
+    }
+
+    /// App hook: persist a background change into the open note.
+    pub fn set_on_background(&self, f: impl Fn(PageBackground) + 'static) {
+        *self.inner.on_background.borrow_mut() = Some(Box::new(f));
+    }
+
+    fn apply_background(&self, bg: PageBackground) {
+        self.inner.canvas.set_background(bg);
+        if let Some(cb) = self.inner.on_background.borrow().as_ref() {
+            cb(bg);
+        }
+    }
+
+    /// Format Background flyout: rule-line and grid styles plus a margin toggle.
+    fn build_background_popover(&self) -> gtk::Popover {
+        let popover = gtk::Popover::new();
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        vbox.set_margin_top(8);
+        vbox.set_margin_bottom(8);
+        vbox.set_margin_start(8);
+        vbox.set_margin_end(8);
+        let cur = self.inner.canvas.background();
+
+        let add = |label: String, selected: bool, bg: PageBackground, pop: &gtk::Popover| {
+            let text = if selected { format!("✓ {label}") } else { format!("   {label}") };
+            let b = gtk::Button::with_label(&text);
+            b.add_css_class("flat");
+            if let Some(l) = b.child().and_downcast::<gtk::Label>() {
+                l.set_xalign(0.0);
+            }
+            let t = self.clone();
+            let pop = pop.clone();
+            b.connect_clicked(move |_| {
+                t.apply_background(bg);
+                pop.popdown();
+            });
+            b
+        };
+
+        vbox.append(&section_label("Rule lines"));
+        let none = PageBackground { kind: BackgroundKind::None, spacing: cur.spacing, margin: cur.margin };
+        vbox.append(&add("None".into(), cur.kind == BackgroundKind::None, none, &popover));
+        for (name, sp) in [("Narrow", 24.0), ("Standard", 32.0), ("Wide", 44.0)] {
+            let bg = PageBackground { kind: BackgroundKind::Rules, spacing: sp, margin: cur.margin };
+            let sel = cur.kind == BackgroundKind::Rules && (cur.spacing - sp).abs() < 0.1;
+            vbox.append(&add(name.to_string(), sel, bg, &popover));
+        }
+        vbox.append(&section_label("Grid"));
+        for (name, sp) in [("Small", 20.0), ("Medium", 32.0), ("Large", 48.0)] {
+            let bg = PageBackground { kind: BackgroundKind::Grid, spacing: sp, margin: cur.margin };
+            let sel = cur.kind == BackgroundKind::Grid && (cur.spacing - sp).abs() < 0.1;
+            vbox.append(&add(name.to_string(), sel, bg, &popover));
+        }
+        vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        let margin_bg = PageBackground { margin: !cur.margin, ..cur };
+        vbox.append(&add("Margin line".into(), cur.margin, margin_bg, &popover));
+
+        popover.set_child(Some(&vbox));
+        popover
+    }
+
+    // -- mode handling (one active mode across select/lasso/eraser/pens) --
+
+    fn set_mode(&self, mode: Mode) {
+        if mode != Mode::Eraser {
+            self.inner.prev_mode.set(mode);
+        }
+        self.inner.mode.set(mode);
+        match mode {
+            Mode::Select => {
+                self.inner.canvas.set_active_tool(ActiveTool::Select);
+            }
+            Mode::Lasso => {
+                self.inner.canvas.set_active_tool(ActiveTool::Lasso);
+            }
+            Mode::Pan => {
+                self.inner.canvas.set_active_tool(ActiveTool::Pan);
+            }
+            Mode::Shape(kind) => {
+                self.inner.last_shape.set(kind);
+                self.inner.canvas.set_shape_tool(kind);
+                self.inner
+                    .canvas
+                    .set_draw_style(*self.inner.shape_color.borrow(), self.inner.shape_width.get());
+            }
+            Mode::Eraser => {
+                let kind = if self.inner.eraser_area.get() { EraserKind::Area } else { EraserKind::Stroke };
+                self.inner.canvas.set_eraser(kind, self.inner.eraser_radius.get());
+            }
+            Mode::Pen(i) => {
+                if let Some(p) = self.inner.pens.borrow().get(i).copied() {
+                    self.inner.canvas.set_pen(p.tool, p.color, p.width);
+                }
+            }
+        }
+        self.refresh_mode_styles();
+        self.save();
+    }
+
+    fn refresh_mode_styles(&self) {
+        let mode = self.inner.mode.get();
+        set_active_css(&self.inner.select_btn, mode == Mode::Select);
+        set_active_css(&self.inner.lasso_btn, mode == Mode::Lasso);
+        set_active_css(&self.inner.pan_btn, mode == Mode::Pan);
+        if matches!(mode, Mode::Shape(_)) {
+            self.inner.shapes_btn.add_css_class("mode-active");
+        } else {
+            self.inner.shapes_btn.remove_css_class("mode-active");
+        }
+        // Gallery children: index 0 is the eraser chip, 1.. are pens.
+        let mut idx: i32 = -1;
+        let mut child = self.inner.gallery.first_child();
+        while let Some(w) = child {
+            idx += 1;
+            let active = match (idx, mode) {
+                (0, Mode::Eraser) => true,
+                (i, Mode::Pen(p)) if i >= 1 => (i - 1) as usize == p,
+                _ => false,
+            };
+            if active {
+                w.add_css_class("pen-active");
+            } else {
+                w.remove_css_class("pen-active");
+            }
+            child = w.next_sibling();
+        }
+    }
+
+    // -- gallery --
+
+    fn rebuild_gallery(&self) {
+        let g = &self.inner.gallery;
+        while let Some(c) = g.first_child() {
+            g.remove(&c);
+        }
+
+        // Eraser chip (first, like OneNote's fluid toolbar).
+        let eraser = gtk::Button::new();
+        eraser.add_css_class("flat");
+        eraser.add_css_class("pen-chip");
+        eraser.set_child(Some(&eraser_glyph()));
+        eraser.set_tooltip_text(Some("Eraser — click again for eraser options"));
+        let t = self.clone();
+        eraser.connect_clicked(move |b| {
+            if t.inner.mode.get() == Mode::Eraser {
+                t.open_eraser_flyout(b.clone().upcast());
+            } else {
+                t.set_mode(Mode::Eraser);
+            }
+        });
+        g.append(&eraser);
+
+        // Pen chips.
+        let pens = self.inner.pens.borrow().clone();
+        for (idx, cfg) in pens.into_iter().enumerate() {
+            let btn = gtk::Button::new();
+            btn.add_css_class("flat");
+            btn.add_css_class("pen-chip");
+            btn.set_child(Some(&pen_glyph(cfg, rgba_of(&self.inner.canvas, cfg.color))));
+            btn.set_tooltip_text(Some(match cfg.tool {
+                Tool::Pencil => "Pencil — click again for thickness & color",
+                Tool::Highlighter => "Highlighter — click again for thickness & color",
+                _ => "Pen — click again for thickness & color",
+            }));
+            let t = self.clone();
+            btn.connect_clicked(move |b| {
+                if t.inner.mode.get() == Mode::Pen(idx) {
+                    t.open_pen_flyout(idx, b.clone().upcast());
+                } else {
+                    t.set_mode(Mode::Pen(idx));
+                }
+            });
+            g.append(&btn);
+        }
+        self.refresh_mode_styles();
+    }
+
+    // -- pen flyout (OneNote: preview, thickness, recent, colors, more, remove) --
+
+    fn open_pen_flyout(&self, idx: usize, anchor: gtk::Widget) {
+        let Some(cfg0) = self.inner.pens.borrow().get(idx).copied() else { return };
+        let cfg = Rc::new(RefCell::new(cfg0));
+
+        let popover = gtk::Popover::new();
+        popover.set_parent(&anchor);
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        vbox.set_margin_top(10);
+        vbox.set_margin_bottom(10);
+        vbox.set_margin_start(12);
+        vbox.set_margin_end(12);
+
+        // Live stroke preview.
+        let preview = gtk::DrawingArea::new();
+        preview.set_content_width(190);
+        preview.set_content_height(30);
+        {
+            let cfg = cfg.clone();
+            let canvas = self.inner.canvas.clone();
+            preview.set_draw_func(move |_, cr, w, h| {
+                let c = *cfg.borrow();
+                let rgba = rgba_of(&canvas, c.color);
+                let alpha = if matches!(c.tool, Tool::Highlighter) { 0.55 } else { 1.0 };
+                set_source(cr, rgba, alpha);
+                cr.set_line_width(c.width.min(h as f64 * 0.8));
+                cr.set_line_cap(gtk::cairo::LineCap::Round);
+                let (w, h) = (w as f64, h as f64);
+                cr.move_to(10.0, h * 0.62);
+                cr.curve_to(w * 0.35, h * 0.15, w * 0.6, h * 0.95, w - 10.0, h * 0.42);
+                let _ = cr.stroke();
+            });
+        }
+        vbox.append(&preview);
+
+        // Thickness: − [dots] +
+        let tlabel = section_label("Thickness");
+        vbox.append(&tlabel);
+        let trow = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let widths: [f64; 5] = if matches!(cfg0.tool, Tool::Highlighter) {
+            [8.0, 12.0, 16.0, 24.0, 36.0]
+        } else {
+            [1.0, 2.0, 3.5, 6.0, 10.0]
+        };
+        let minus = small_label_button("−");
+        trow.append(&minus);
+        for w in widths {
+            let dot = gtk::Button::new();
+            dot.add_css_class("flat");
+            let d = (5.0_f64 + w * 1.4).min(24.0) as i32;
+            let dot_area = gtk::DrawingArea::new();
+            dot_area.set_content_width(24);
+            dot_area.set_content_height(24);
+            let cfg_for_draw = cfg.clone();
+            let canvas_for_draw = self.inner.canvas.clone();
+            dot_area.set_draw_func(move |_, cr, aw, ah| {
+                let c = *cfg_for_draw.borrow();
+                let rgba = rgba_of(&canvas_for_draw, c.color);
+                set_source(cr, rgba, 1.0);
+                cr.arc(aw as f64 / 2.0, ah as f64 / 2.0, d as f64 / 2.0, 0.0, std::f64::consts::TAU);
+                let _ = cr.fill();
+                if (c.width - w).abs() < 0.01 {
+                    cr.set_source_rgb(0.48, 0.64, 0.97);
+                    cr.set_line_width(1.5);
+                    cr.arc(aw as f64 / 2.0, ah as f64 / 2.0, (aw as f64 / 2.0) - 1.5, 0.0, std::f64::consts::TAU);
+                    let _ = cr.stroke();
+                }
+            });
+            dot.set_child(Some(&dot_area));
+            let t = self.clone();
+            let cfg2 = cfg.clone();
+            let preview2 = preview.clone();
+            let trow2 = trow.clone();
+            dot.connect_clicked(move |_| {
+                cfg2.borrow_mut().width = w;
+                t.commit_pen(idx, &cfg2, &preview2);
+                redraw_children(&trow2);
+            });
+            trow.append(&dot);
+        }
+        let plus = small_label_button("+");
+        trow.append(&plus);
+        vbox.append(&trow);
+
+        // − / + steppers.
+        {
+            let t = self.clone();
+            let cfg2 = cfg.clone();
+            let preview2 = preview.clone();
+            let trow2 = trow.clone();
+            minus.connect_clicked(move |_| {
+                let w = (cfg2.borrow().width * 0.8).max(0.5);
+                cfg2.borrow_mut().width = w;
+                t.commit_pen(idx, &cfg2, &preview2);
+                redraw_children(&trow2);
+            });
+        }
+        {
+            let t = self.clone();
+            let cfg2 = cfg.clone();
+            let preview2 = preview.clone();
+            let trow2 = trow.clone();
+            plus.connect_clicked(move |_| {
+                let w = (cfg2.borrow().width * 1.25).min(60.0);
+                cfg2.borrow_mut().width = w;
+                t.commit_pen(idx, &cfg2, &preview2);
+                redraw_children(&trow2);
+            });
+        }
+
+        // Recent colors.
+        let recent = self.inner.recent.borrow().clone();
+        if !recent.is_empty() {
+            vbox.append(&section_label("Recent Colors"));
+            let rrow = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            for color in recent.into_iter().take(6) {
+                rrow.append(&self.color_button(color, idx, &cfg, &preview, &trow));
+            }
+            vbox.append(&rrow);
+        }
+
+        // Colors grid.
+        vbox.append(&section_label("Colors"));
+        let grid_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        for row in color_rows() {
+            let r = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            for (name, color) in row {
+                let b = self.color_button(color, idx, &cfg, &preview, &trow);
+                b.set_tooltip_text(Some(name));
+                r.append(&b);
+            }
+            grid_box.append(&r);
+        }
+        vbox.append(&grid_box);
+
+        vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        // More Colors…
+        let more = gtk::Button::with_label("More Colors…");
+        more.add_css_class("flat");
+        if let Some(l) = more.child().and_downcast::<gtk::Label>() {
+            l.set_xalign(0.0);
+        }
+        {
+            let t = self.clone();
+            let cfg2 = cfg.clone();
+            let preview2 = preview.clone();
+            let trow2 = trow.clone();
+            let anchor2 = anchor.clone();
+            more.connect_clicked(move |_| {
+                let dialog = gtk::ColorDialog::new();
+                let window = anchor2.root().and_downcast::<gtk::Window>();
+                let t = t.clone();
+                let cfg2 = cfg2.clone();
+                let preview2 = preview2.clone();
+                let trow2 = trow2.clone();
+                glib::spawn_future_local(async move {
+                    if let Ok(rgba) =
+                        dialog.choose_rgba_future(window.as_ref(), Some(&rgba_of(&t.inner.canvas, cfg2.borrow().color))).await
+                    {
+                        let color = SemanticColor::Fixed(Rgba {
+                            r: rgba.red(),
+                            g: rgba.green(),
+                            b: rgba.blue(),
+                            a: rgba.alpha(),
+                        });
+                        cfg2.borrow_mut().color = color;
+                        t.push_recent(color);
+                        t.commit_pen(idx, &cfg2, &preview2);
+                        redraw_children(&trow2);
+                    }
+                });
+            });
+        }
+        vbox.append(&more);
+
+        // Remove pen.
+        if self.inner.pens.borrow().len() > 1 {
+            let remove = gtk::Button::with_label("Remove Pen");
+            remove.add_css_class("flat");
+            remove.add_css_class("destructive-action");
+            if let Some(l) = remove.child().and_downcast::<gtk::Label>() {
+                l.set_xalign(0.0);
+            }
+            let t = self.clone();
+            let pop = popover.clone();
+            remove.connect_clicked(move |_| {
+                {
+                    let mut pens = t.inner.pens.borrow_mut();
+                    if pens.len() > 1 && idx < pens.len() {
+                        pens.remove(idx);
+                    }
+                }
+                pop.popdown();
+                t.rebuild_gallery();
+                t.set_mode(Mode::Pen(0));
+                t.save();
+            });
+            vbox.append(&remove);
+        }
+
+        popover.set_child(Some(&vbox));
+        popover.popup();
+    }
+
+    /// Shapes flyout: kind picker, thickness dots and the color grid, all
+    /// bound to the shape tool's own persistent style.
+    fn build_shapes_popover(&self) -> gtk::Popover {
+        let popover = gtk::Popover::new();
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        vbox.set_margin_top(10);
+        vbox.set_margin_bottom(10);
+        vbox.set_margin_start(12);
+        vbox.set_margin_end(12);
+
+        let areas: Rc<RefCell<Vec<gtk::DrawingArea>>> = Rc::new(RefCell::new(Vec::new()));
+
+        vbox.append(&section_label("Shape"));
+        let krow = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        for (tip, kind) in [
+            ("Line", ShapeKind::Line),
+            ("Arrow", ShapeKind::Arrow),
+            ("Rectangle", ShapeKind::Rect),
+            ("Ellipse", ShapeKind::Ellipse),
+        ] {
+            let b = gtk::Button::new();
+            b.add_css_class("flat");
+            b.set_tooltip_text(Some(tip));
+            let icon = self.shape_icon(kind);
+            areas.borrow_mut().push(icon.clone());
+            b.set_child(Some(&icon));
+            let t = self.clone();
+            let pop = popover.clone();
+            b.connect_clicked(move |_| {
+                t.set_mode(Mode::Shape(kind));
+                pop.popdown();
+            });
+            krow.append(&b);
+        }
+        vbox.append(&krow);
+
+        vbox.append(&section_label("Thickness"));
+        let trow = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        for w in [1.5_f64, 2.5, 3.5, 6.0, 10.0] {
+            let dot = gtk::Button::new();
+            dot.add_css_class("flat");
+            let area = gtk::DrawingArea::new();
+            area.set_content_width(24);
+            area.set_content_height(24);
+            let t = self.clone();
+            area.set_draw_func(move |_, cr, aw, ah| {
+                let rgba = rgba_of(&t.inner.canvas, *t.inner.shape_color.borrow());
+                set_source(cr, rgba, 1.0);
+                let d = (5.0_f64 + w * 1.4).min(22.0);
+                cr.arc(aw as f64 / 2.0, ah as f64 / 2.0, d / 2.0, 0.0, std::f64::consts::TAU);
+                let _ = cr.fill();
+                if (t.inner.shape_width.get() - w).abs() < 0.01 {
+                    cr.set_source_rgb(0.48, 0.64, 0.97);
+                    cr.set_line_width(1.5);
+                    cr.arc(aw as f64 / 2.0, ah as f64 / 2.0, (aw as f64 / 2.0) - 1.5, 0.0, std::f64::consts::TAU);
+                    let _ = cr.stroke();
+                }
+            });
+            areas.borrow_mut().push(area.clone());
+            dot.set_child(Some(&area));
+            let t = self.clone();
+            let areas2 = areas.clone();
+            dot.connect_clicked(move |_| {
+                t.inner.shape_width.set(w);
+                t.apply_shape_style();
+                for a in areas2.borrow().iter() {
+                    a.queue_draw();
+                }
+            });
+            trow.append(&dot);
+        }
+        vbox.append(&trow);
+
+        vbox.append(&section_label("Colors"));
+        let grid_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        for row in color_rows() {
+            let r = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            for (name, color) in row {
+                let b = gtk::Button::new();
+                b.add_css_class("flat");
+                b.add_css_class("swatch-btn");
+                b.set_child(Some(&color_swatch(rgba_of(&self.inner.canvas, color), 22)));
+                b.set_tooltip_text(Some(name));
+                let t = self.clone();
+                let areas2 = areas.clone();
+                b.connect_clicked(move |_| {
+                    *t.inner.shape_color.borrow_mut() = color;
+                    t.apply_shape_style();
+                    for a in areas2.borrow().iter() {
+                        a.queue_draw();
+                    }
+                });
+                r.append(&b);
+            }
+            grid_box.append(&r);
+        }
+        vbox.append(&grid_box);
+
+        popover.set_child(Some(&vbox));
+        popover
+    }
+
+    fn apply_shape_style(&self) {
+        if matches!(self.inner.mode.get(), Mode::Shape(_)) {
+            self.inner
+                .canvas
+                .set_draw_style(*self.inner.shape_color.borrow(), self.inner.shape_width.get());
+        }
+        self.save();
+    }
+
+    /// Small drawn icon for a shape kind, in the current shape color; the
+    /// currently selected kind gets an accent ring.
+    fn shape_icon(&self, kind: ShapeKind) -> gtk::DrawingArea {
+        let area = gtk::DrawingArea::new();
+        area.set_content_width(26);
+        area.set_content_height(26);
+        let t = self.clone();
+        area.set_draw_func(move |_, cr, w, h| {
+            let w = w as f64;
+            let h = h as f64;
+            let rgba = rgba_of(&t.inner.canvas, *t.inner.shape_color.borrow());
+            set_source(cr, rgba, 1.0);
+            cr.set_line_width(1.8);
+            cr.set_line_cap(gtk::cairo::LineCap::Round);
+            match kind {
+                ShapeKind::Line => {
+                    cr.move_to(w * 0.18, h * 0.78);
+                    cr.line_to(w * 0.82, h * 0.22);
+                    let _ = cr.stroke();
+                }
+                ShapeKind::Arrow => {
+                    cr.move_to(w * 0.18, h * 0.78);
+                    cr.line_to(w * 0.78, h * 0.26);
+                    let _ = cr.stroke();
+                    cr.move_to(w * 0.56, h * 0.24);
+                    cr.line_to(w * 0.80, h * 0.24);
+                    cr.line_to(w * 0.80, h * 0.48);
+                    let _ = cr.stroke();
+                }
+                ShapeKind::Rect => {
+                    cr.rectangle(w * 0.18, h * 0.26, w * 0.64, h * 0.48);
+                    let _ = cr.stroke();
+                }
+                ShapeKind::Ellipse => {
+                    let _ = cr.save();
+                    cr.translate(w / 2.0, h / 2.0);
+                    cr.scale(1.0, 0.68);
+                    cr.arc(0.0, 0.0, w * 0.32, 0.0, std::f64::consts::TAU);
+                    let _ = cr.restore();
+                    let _ = cr.stroke();
+                }
+            }
+            if t.inner.mode.get() == Mode::Shape(kind) {
+                cr.set_source_rgb(0.48, 0.64, 0.97);
+                cr.set_line_width(1.2);
+                rounded_rect(cr, 1.0, 1.0, w - 2.0, h - 2.0, 5.0);
+                let _ = cr.stroke();
+            }
+        });
+        area
+    }
+
+    fn color_button(
+        &self,
+        color: SemanticColor,
+        idx: usize,
+        cfg: &Rc<RefCell<PenCfg>>,
+        preview: &gtk::DrawingArea,
+        trow: &gtk::Box,
+    ) -> gtk::Button {
+        let b = gtk::Button::new();
+        b.add_css_class("flat");
+        b.add_css_class("swatch-btn");
+        b.set_child(Some(&color_swatch(rgba_of(&self.inner.canvas, color), 22)));
+        let t = self.clone();
+        let cfg = cfg.clone();
+        let preview = preview.clone();
+        let trow = trow.clone();
+        b.connect_clicked(move |_| {
+            cfg.borrow_mut().color = color;
+            t.push_recent(color);
+            t.commit_pen(idx, &cfg, &preview);
+            redraw_children(&trow);
+        });
+        b
+    }
+
+    /// Write the edited cfg back to the pen list, apply it to the canvas,
+    /// refresh the chip glyph and the flyout preview, persist.
+    fn commit_pen(&self, idx: usize, cfg: &Rc<RefCell<PenCfg>>, preview: &gtk::DrawingArea) {
+        let c = *cfg.borrow();
+        if let Some(p) = self.inner.pens.borrow_mut().get_mut(idx) {
+            *p = c;
+        }
+        self.inner.canvas.set_pen(c.tool, c.color, c.width);
+        preview.queue_draw();
+        // Update the chip glyph in place (child index = idx + 1; eraser is 0).
+        let mut i: i32 = -1;
+        let mut child = self.inner.gallery.first_child();
+        while let Some(w) = child {
+            i += 1;
+            if i == idx as i32 + 1 {
+                if let Some(btn) = w.downcast_ref::<gtk::Button>() {
+                    btn.set_child(Some(&pen_glyph(c, rgba_of(&self.inner.canvas, c.color))));
+                }
+                break;
+            }
+            child = w.next_sibling();
+        }
+        self.save();
+    }
+
+    fn push_recent(&self, color: SemanticColor) {
+        let mut r = self.inner.recent.borrow_mut();
+        r.retain(|c| *c != color);
+        r.insert(0, color);
+        r.truncate(6);
+    }
+
+    // -- eraser flyout --
+
+    fn open_eraser_flyout(&self, anchor: gtk::Widget) {
+        let popover = gtk::Popover::new();
+        popover.set_parent(&anchor);
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        vbox.set_margin_top(8);
+        vbox.set_margin_bottom(8);
+        vbox.set_margin_start(8);
+        vbox.set_margin_end(8);
+        vbox.append(&section_label("Eraser"));
+        let options: [(&str, bool, f64); 4] = [
+            ("Stroke eraser", false, 16.0),
+            ("Small", true, 8.0),
+            ("Medium", true, 16.0),
+            ("Large", true, 28.0),
+        ];
+        let cur_area = self.inner.eraser_area.get();
+        let cur_r = self.inner.eraser_radius.get();
+        for (label, area, radius) in options {
+            let selected = cur_area == area && (!area || (cur_r - radius).abs() < 0.1);
+            let text = if selected { format!("✓ {label}") } else { format!("   {label}") };
+            let b = gtk::Button::with_label(&text);
+            b.add_css_class("flat");
+            if let Some(l) = b.child().and_downcast::<gtk::Label>() {
+                l.set_xalign(0.0);
+            }
+            let t = self.clone();
+            let pop = popover.clone();
+            b.connect_clicked(move |_| {
+                t.inner.eraser_area.set(area);
+                t.inner.eraser_radius.set(radius);
+                t.set_mode(Mode::Eraser);
+                pop.popdown();
+            });
+            vbox.append(&b);
+        }
+        popover.set_child(Some(&vbox));
+        popover.popup();
+    }
+
+    // -- persistence --
+
+    fn save(&self) {
+        let active_pen = match self.inner.mode.get() {
+            Mode::Pen(i) => i,
+            _ => 0,
+        };
+        let st = ToolbarState {
+            schema: 1,
+            pens: self.inner.pens.borrow().clone(),
+            active_pen,
+            eraser_area: self.inner.eraser_area.get(),
+            eraser_radius: self.inner.eraser_radius.get(),
+            recent: self.inner.recent.borrow().clone(),
+            shape_color: *self.inner.shape_color.borrow(),
+            shape_width: self.inner.shape_width.get(),
+            canvas_inverted: self.inner.canvas.inverted(),
+        };
+        let dir = store::state_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(bytes) = serde_json::to_vec_pretty(&st) {
+            let _ = store::atomic::atomic_write(&dir.join(STATE_FILE), &bytes);
+        }
+    }
+}
+
+fn load_state() -> ToolbarState {
+    let path = store::state_dir().join(STATE_FILE);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<ToolbarState>(&t).ok())
+        .filter(|s| !s.pens.is_empty())
+        .unwrap_or_default()
+}
+
+fn set_active_css(w: &gtk::Button, active: bool) {
+    if active {
+        w.add_css_class("mode-active");
+    } else {
+        w.remove_css_class("mode-active");
+    }
+}
+
+fn redraw_children(row: &gtk::Box) {
+    let mut child = row.first_child();
+    while let Some(w) = child {
+        w.queue_draw();
+        if let Some(inner) = w.first_child() {
+            inner.queue_draw();
+        }
+        child = w.next_sibling();
+    }
+}
+
+fn section_label(text: &str) -> gtk::Label {
+    let l = gtk::Label::new(Some(text));
+    l.set_xalign(0.0);
+    l.add_css_class("dim-label");
+    l
+}
+
+fn small_label_button(text: &str) -> gtk::Button {
+    let b = gtk::Button::with_label(text);
+    b.add_css_class("flat");
+    b
+}
+
+fn vsep() -> gtk::Separator {
+    let s = gtk::Separator::new(gtk::Orientation::Vertical);
+    s.set_margin_top(8);
+    s.set_margin_bottom(8);
+    s
+}

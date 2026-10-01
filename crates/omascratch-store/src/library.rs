@@ -41,6 +41,39 @@ fn trash_file(notebook_dir: &Path, path: &Path) -> Result<()> {
     std::fs::rename(path, &dest).map_err(|e| StoreError::io(path, e))
 }
 
+// ---- notebooks ----
+
+/// Rename a notebook: updates `notebook.json` and renames the directory.
+/// Fails if the target name already exists.
+pub fn rename_notebook(root: &Path, old_name: &str, new_name: &str) -> Result<PathBuf> {
+    let old_dir = root.join(old_name);
+    let new_dir = root.join(new_name);
+    if new_dir.exists() {
+        return Err(StoreError::corrupt(&new_dir, "a notebook with that name already exists"));
+    }
+    let meta_path = old_dir.join("notebook.json");
+    let mut meta: crate::notebook::NotebookMeta = serde_json::from_slice(
+        &std::fs::read(&meta_path).map_err(|e| StoreError::io(&meta_path, e))?,
+    )
+    .map_err(|e| StoreError::corrupt(&meta_path, e.to_string()))?;
+    meta.name = new_name.to_string();
+    write_json(&meta_path, &meta)?;
+    std::fs::rename(&old_dir, &new_dir).map_err(|e| StoreError::io(&old_dir, e))?;
+    Ok(new_dir)
+}
+
+/// Trash a whole notebook: moved under `<root>/.trash/`, never deleted.
+pub fn delete_notebook(root: &Path, name: &str) -> Result<()> {
+    let dir = root.join(name);
+    if !dir.exists() {
+        return Ok(());
+    }
+    let trash = root.join(".trash");
+    std::fs::create_dir_all(&trash).map_err(|e| StoreError::io(&trash, e))?;
+    let dest = trash.join(format!("{}-{}", now_ms(), name));
+    std::fs::rename(&dir, &dest).map_err(|e| StoreError::io(&dir, e))
+}
+
 // ---- folders ----
 
 fn folder_path(notebook_dir: &Path, id: FolderId) -> PathBuf {
@@ -164,6 +197,7 @@ pub fn create_note(
         order_key: key_after_last(&siblings),
         created_ms: now_ms(),
         modified_ms: now_ms(),
+        background: Default::default(),
         content: omascratch_core::NoteContent::default(),
         opaque_elements: vec![],
     };
@@ -291,6 +325,38 @@ mod tests {
         let reloaded = read_note(&path).unwrap();
         assert_eq!(reloaded.id, doc.id);
         assert_eq!(reloaded.folder, None);
+    }
+
+    #[test]
+    fn rename_notebook_updates_meta_and_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let tree = create_notebook(root.path(), "Old", 1).unwrap();
+        let (_, path) = create_note(&tree, "Keep", None).unwrap();
+        assert!(path.exists());
+
+        let new_dir = rename_notebook(root.path(), "Old", "New").unwrap();
+        assert!(!root.path().join("Old").exists());
+        assert!(new_dir.join("notebook.json").exists());
+        let tree = crate::notebook::scan_notebook(&new_dir).unwrap().unwrap();
+        assert_eq!(tree.meta.name, "New");
+        assert_eq!(tree.notes.len(), 1);
+        // Renaming onto an existing notebook is refused.
+        create_notebook(root.path(), "Taken", 1).unwrap();
+        assert!(rename_notebook(root.path(), "New", "Taken").is_err());
+    }
+
+    #[test]
+    fn delete_notebook_moves_to_root_trash() {
+        let root = tempfile::tempdir().unwrap();
+        let tree = create_notebook(root.path(), "Doomed", 1).unwrap();
+        create_note(&tree, "n", None).unwrap();
+        delete_notebook(root.path(), "Doomed").unwrap();
+        assert!(!root.path().join("Doomed").exists());
+        let trashed: Vec<_> = std::fs::read_dir(root.path().join(".trash")).unwrap().collect();
+        assert_eq!(trashed.len(), 1, "notebook recoverable from .trash");
+        // Scan ignores the root trash.
+        let (books, _) = crate::notebook::scan_root(root.path()).unwrap();
+        assert!(books.is_empty());
     }
 
     #[test]

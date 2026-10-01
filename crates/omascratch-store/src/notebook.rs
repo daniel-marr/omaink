@@ -178,6 +178,7 @@ mod tests {
             order_key: "a0".into(),
             created_ms: 1,
             modified_ms: 1,
+            background: Default::default(),
             content: NoteContent::default(),
             opaque_elements: vec![],
         }

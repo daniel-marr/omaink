@@ -629,6 +629,8 @@ dependencies = [
  "omascratch-ink",
  "omascratch-store",
  "omascratch-theme",
+ "serde",
+ "serde_json",
  "tracing",
  "uuid",
 ]

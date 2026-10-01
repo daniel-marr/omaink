@@ -57,6 +57,7 @@ mod tests {
             order_key: "a0".into(),
             created_ms: 1_000,
             modified_ms: 1_000,
+            background: Default::default(),
             content: NoteContent {
                 strokes: vec![Stroke {
                     id: StrokeId::new(),

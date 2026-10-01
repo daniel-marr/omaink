@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use omascratch_core::{FolderId, InkPoint, NoteContent, NoteId, Rgba, SemanticColor, Stroke, StrokeId, Tool};
+use omascratch_core::{FolderId, InkPoint, NoteContent, NoteId, PageBackground, Rgba, SemanticColor, Stroke, StrokeId, Tool};
 
 pub const NOTE_SCHEMA: u32 = 1;
 
@@ -22,6 +22,8 @@ pub struct NoteFileV1 {
     pub order_key: String,
     pub created_ms: u64,
     pub modified_ms: u64,
+    #[serde(default)]
+    pub background: PageBackground,
     pub elements: Vec<DiskElement>,
 }
 
@@ -143,6 +145,7 @@ pub struct NoteDoc {
     pub order_key: String,
     pub created_ms: u64,
     pub modified_ms: u64,
+    pub background: PageBackground,
     pub content: NoteContent,
     /// Unknown elements carried through untouched.
     pub opaque_elements: Vec<serde_json::Value>,
@@ -165,6 +168,7 @@ impl NoteDoc {
             order_key: self.order_key.clone(),
             created_ms: self.created_ms,
             modified_ms,
+            background: self.background,
             elements,
         }
     }
@@ -185,6 +189,7 @@ impl NoteDoc {
             order_key: f.order_key,
             created_ms: f.created_ms,
             modified_ms: f.modified_ms,
+            background: f.background,
             content,
             opaque_elements: opaque,
         }

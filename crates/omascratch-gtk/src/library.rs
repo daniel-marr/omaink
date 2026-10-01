@@ -138,6 +138,41 @@ impl Library {
         }
     }
 
+    /// Rename the current notebook. Returns (old_dir, new_dir) on success.
+    pub fn rename_current_notebook(&self, new_name: &str) -> Option<(PathBuf, PathBuf)> {
+        let old_name = self.current.borrow().as_ref()?.meta.name.clone();
+        if old_name == new_name || new_name.trim().is_empty() {
+            return None;
+        }
+        let old_dir = self.current.borrow().as_ref()?.dir.clone();
+        let new_dir = store::rename_notebook(&self.root, &old_name, new_name).ok()?;
+        {
+            let mut names = self.notebooks.borrow_mut();
+            if let Some(n) = names.iter_mut().find(|n| **n == old_name) {
+                *n = new_name.to_string();
+            }
+        }
+        if let Ok(Some(tree)) = store::scan_notebook(&new_dir) {
+            *self.current.borrow_mut() = Some(tree);
+        }
+        Some((old_dir, new_dir))
+    }
+
+    /// Trash the current notebook. Returns its old dir; selects another
+    /// notebook when one exists.
+    pub fn delete_current_notebook(&self) -> Option<PathBuf> {
+        let name = self.current.borrow().as_ref()?.meta.name.clone();
+        let old_dir = self.current.borrow().as_ref()?.dir.clone();
+        store::delete_notebook(&self.root, &name).ok()?;
+        self.notebooks.borrow_mut().retain(|n| *n != name);
+        let next = self.notebooks.borrow().first().cloned();
+        *self.current.borrow_mut() = None;
+        if let Some(next) = next {
+            self.select_notebook(&next);
+        }
+        Some(old_dir)
+    }
+
     pub fn create_notebook(&self, name: &str) {
         if let Ok(tree) = store::create_notebook(&self.root, name, now_ms()) {
             self.notebooks.borrow_mut().push(tree.meta.name.clone());
@@ -283,6 +318,8 @@ impl Library {
     }
 
     /// Nest `src` folder inside `target`, appended at the end. No-ops on cycles.
+    /// (Currently unused: sub-folders are disabled in the UI by product choice.)
+    #[allow(dead_code)]
     pub fn drop_folder_into_folder(&self, src: FolderId, target: FolderId) {
         if src == target || self.is_descendant(target, src) {
             return;

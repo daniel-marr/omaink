@@ -4,6 +4,10 @@
 //! crate holds the geometry: smoothing/outlines (perfect-freehand via
 //! `freedraw`), and later hit-testing, eraser splitting and spatial indexing.
 
+pub mod hit;
 pub mod outline;
+pub mod shapes;
 
+pub use hit::{distance_to_stroke, erase_samples, point_in_polygon, stroke_hit, stroke_inside_polygon, stroke_inside_rect, stroke_touched};
+pub use shapes::{shape_polylines, ShapeKind};
 pub use outline::{outline_points, outline_to_bezpath, stroke_bezpath};

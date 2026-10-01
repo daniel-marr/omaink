@@ -13,7 +13,6 @@ use crate::APP_ID;
 
 pub fn run() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
-    app.connect_startup(|_| theme::install());
     app.connect_activate(build_window);
     app.run()
 }
@@ -32,56 +31,56 @@ fn build_window(app: &adw::Application) {
     sidebar.set_selected(&storage.current_path());
     sidebar.refresh();
 
-    // On-canvas, editable note title (top-left), like OneNote / Obsidian.
-    // Commit only when editing *finishes* (the "editing" property goes false);
-    // reacting to every `changed` caused title feedback/duplication.
-    let title = gtk::EditableLabel::new(&storage.current_title());
-    title.add_css_class("page-title");
-    title.set_halign(gtk::Align::Start);
-    title.set_valign(gtk::Align::Start);
-    title.set_margin_start(24);
-    title.set_margin_top(16);
-    title.set_max_width_chars(48);
+    // Full-width top toolbar with the draw tools. The canvas title sits below
+    // it, down in the page.
+    let toolbar = gtk::CenterBox::new();
+    toolbar.add_css_class("main-toolbar");
+    toolbar.set_hexpand(true);
+    let theme_mgr = theme::Manager::start(&canvas);
+    let draw_toolbar = crate::toolbar::build(&canvas);
+    theme_mgr.attach_toolbar(&draw_toolbar);
     {
+        // Stylus barrel click toggles the eraser (and back).
+        let tb = draw_toolbar.clone();
+        canvas.set_on_eraser_toggle(move || tb.toggle_eraser());
+    }
+    toolbar.set_start_widget(Some(&draw_toolbar.widget));
+    {
+        // Persist background changes into the open note.
         let storage = storage.clone();
         let canvas_w = canvas.downgrade();
-        let sidebar = sidebar.clone();
-        title.connect_notify_local(Some("editing"), move |l, _| {
-            if l.property::<bool>("editing") {
-                return; // editing just started
-            }
-            let t = l.text().to_string();
-            if t.trim().is_empty() {
-                l.set_text(&storage.current_title());
-                return;
-            }
-            if t == storage.current_title() {
-                return;
-            }
+        draw_toolbar.set_on_background(move |bg| {
             if let Some(canvas) = canvas_w.upgrade() {
-                storage.set_title(&t, &canvas);
-                sidebar.refresh();
+                storage.set_background(bg, &canvas);
             }
         });
     }
 
-    // Full-width top toolbar (placeholder for the M4 draw tools). The canvas
-    // title sits below it, down in the page.
-    let toolbar = gtk::CenterBox::new();
-    toolbar.add_css_class("main-toolbar");
-    toolbar.set_hexpand(true);
-
     let fs_btn = gtk::Button::from_icon_name("view-fullscreen-symbolic");
     fs_btn.add_css_class("flat");
     fs_btn.set_tooltip_text(Some("Fullscreen canvas (F11)"));
+    // Zoom indicator: shows the live zoom, click to return to 100%.
+    let zoom_btn = gtk::Button::with_label("100%");
+    zoom_btn.add_css_class("flat");
+    zoom_btn.add_css_class("zoom-indicator");
+    zoom_btn.set_tooltip_text(Some("Zoom — click for 100% (Ctrl+0 resets view)"));
+    {
+        let c = canvas.clone();
+        zoom_btn.connect_clicked(move |_| c.zoom_to_100());
+    }
+    {
+        let zb = zoom_btn.clone();
+        canvas.set_on_zoom(move |z| zb.set_label(&format!("{:.0}%", z * 100.0)));
+    }
+
     let toolbar_end = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     toolbar_end.set_margin_end(8);
+    toolbar_end.append(&zoom_btn);
     toolbar_end.append(&fs_btn);
     toolbar.set_end_widget(Some(&toolbar_end));
 
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&canvas));
-    overlay.add_overlay(&title);
 
     let content_view = adw::ToolbarView::new();
     content_view.set_top_bar_style(adw::ToolbarStyle::Flat);
@@ -126,11 +125,9 @@ fn build_window(app: &adw::Application) {
     {
         let storage = storage.clone();
         let canvas_w = canvas.downgrade();
-        let title = title.clone();
         sidebar.set_on_open_note(move |path| {
             if let Some(canvas) = canvas_w.upgrade() {
-                let t = storage.switch_to(path, &canvas);
-                title.set_text(&t);
+                let _ = storage.switch_to(path, &canvas);
             }
         });
     }
@@ -141,21 +138,50 @@ fn build_window(app: &adw::Application) {
         let storage = storage.clone();
         let canvas_w = canvas.downgrade();
         let library = library.clone();
-        let title = title.clone();
         sidebar.set_on_rename_note(move |path, name| {
             if path == storage.current_path() {
                 if let Some(canvas) = canvas_w.upgrade() {
                     storage.set_title(name, &canvas);
                 }
-                title.set_text(name);
             } else {
                 library.rename_note_on_disk(path, name);
             }
         });
     }
 
+    // Notebook renamed: if the open note lived inside, follow its new path.
+    {
+        let storage = storage.clone();
+        sidebar.set_on_notebook_renamed(move |old_dir, new_dir| {
+            let cur = storage.current_path();
+            if let Ok(rest) = cur.strip_prefix(old_dir) {
+                storage.relocate(new_dir.join(rest));
+            }
+        });
+    }
+    // Notebook trashed: if the open note was inside, open another note
+    // (without saving into the trashed tree).
+    {
+        let storage = storage.clone();
+        let canvas_w = canvas.downgrade();
+        let library = library.clone();
+        sidebar.set_on_notebook_deleted(move |old_dir| {
+            if storage.current_path().starts_with(old_dir) {
+                if let Some(canvas) = canvas_w.upgrade() {
+                    library.ensure_notebook();
+                    let next = first_note_path(&library);
+                    storage.abandon_and_open(&next, &canvas);
+                }
+            }
+        });
+    }
+
     install_shortcuts(&window, &canvas, &split, toggle_fullscreen);
     install_close_handler(&window, &storage, &canvas);
+    // Keep the theme manager (CSS provider + file watcher) alive with the window.
+    window.connect_map(move |_| {
+        let _ = &theme_mgr;
+    });
     window.present();
 }
 
@@ -207,6 +233,26 @@ fn install_shortcuts(
             }
             gdk::Key::F11 => {
                 toggle_fullscreen();
+                glib::Propagation::Stop
+            }
+            gdk::Key::c if ctrl && c.has_selection() => {
+                c.copy_selection();
+                glib::Propagation::Stop
+            }
+            gdk::Key::x if ctrl && c.has_selection() => {
+                c.cut_selection();
+                glib::Propagation::Stop
+            }
+            gdk::Key::v if ctrl && c.clipboard_has_strokes() => {
+                c.paste_clipboard();
+                glib::Propagation::Stop
+            }
+            gdk::Key::Delete | gdk::Key::BackSpace if c.has_selection() => {
+                c.delete_selection();
+                glib::Propagation::Stop
+            }
+            gdk::Key::Escape if c.has_selection() => {
+                c.clear_selection();
                 glib::Propagation::Stop
             }
             gdk::Key::o | gdk::Key::O if !ctrl => {

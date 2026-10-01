@@ -10,6 +10,8 @@ use std::rc::Rc;
 
 use gtk4 as gtk;
 use gtk4::{gdk, glib, pango, prelude::*};
+use libadwaita as adw;
+use libadwaita::prelude::*;
 
 use omascratch_core::FolderId;
 
@@ -40,6 +42,8 @@ struct Inner {
     drag: RefCell<Option<RowRef>>,
     on_open_note: RefCell<Option<Box<dyn Fn(&Path)>>>,
     on_rename_note: RefCell<Option<Box<dyn Fn(&Path, &str)>>>,
+    on_notebook_renamed: RefCell<Option<Box<dyn Fn(&Path, &Path)>>>,
+    on_notebook_deleted: RefCell<Option<Box<dyn Fn(&Path)>>>,
 }
 
 impl Sidebar {
@@ -128,6 +132,8 @@ impl Sidebar {
             drag: RefCell::new(None),
             on_open_note: RefCell::new(None),
             on_rename_note: RefCell::new(None),
+            on_notebook_renamed: RefCell::new(None),
+            on_notebook_deleted: RefCell::new(None),
         });
         let sidebar = Sidebar { widget, inner: inner.clone() };
 
@@ -202,6 +208,17 @@ impl Sidebar {
     /// clobber) and the on-canvas title stays in sync.
     pub fn set_on_rename_note(&self, f: impl Fn(&Path, &str) + 'static) {
         *self.inner.on_rename_note.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Fired after a notebook rename with (old_dir, new_dir), so the app can
+    /// relocate the open note's save path.
+    pub fn set_on_notebook_renamed(&self, f: impl Fn(&Path, &Path) + 'static) {
+        *self.inner.on_notebook_renamed.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Fired after a notebook is trashed with its old dir.
+    pub fn set_on_notebook_deleted(&self, f: impl Fn(&Path) + 'static) {
+        *self.inner.on_notebook_deleted.borrow_mut() = Some(Box::new(f));
     }
 
     pub fn set_selected(&self, path: &Path) {
@@ -281,7 +298,7 @@ impl Sidebar {
     fn build_row(
         &self,
         row: &Row,
-        idx: usize,
+        _idx: usize,
         editing: bool,
         collapsed: bool,
     ) -> (gtk::ListBoxRow, RowRef) {
@@ -405,7 +422,7 @@ impl Sidebar {
                 label.set_tooltip_text(Some("Sync conflict copy"));
             }
             hbox.append(&label);
-            hbox.append(&self.row_menu(&rref));
+            hbox.append(&self.row_menu(&rref, &title_text));
         }
 
         let list_row = gtk::ListBoxRow::new();
@@ -414,14 +431,18 @@ impl Sidebar {
 
         {
             let sb = self.clone();
+            let rref2 = rref.clone();
+            let title2 = title_text.clone();
             let dbl = gtk::GestureClick::new();
             dbl.set_button(gdk::BUTTON_PRIMARY);
             // Capture phase: see the double press before the ListBox consumes it.
             dbl.set_propagation_phase(gtk::PropagationPhase::Capture);
             dbl.connect_pressed(move |_, n, _, _| {
                 if n == 2 {
-                    *sb.inner.editing.borrow_mut() = Some(idx);
-                    sb.refresh_idle();
+                    match &rref2 {
+                        RowRef::Folder(id) => sb.prompt_rename_folder(*id, &title2),
+                        RowRef::Note { path } => sb.prompt_rename_note(path, &title2),
+                    }
                 }
             });
             list_row.add_controller(dbl);
@@ -457,14 +478,10 @@ impl Sidebar {
                 (RowRef::Note { path }, RowRef::Folder(fid)) => {
                     sb.inner.library.drop_note_into_folder(path, Some(*fid));
                 }
+                // Sub-folders are disabled: dropping a folder on a folder
+                // only reorders it (no nesting).
                 (RowRef::Folder(sid), RowRef::Folder(tid)) => {
-                    if frac < 0.33 {
-                        sb.inner.library.drop_folder_near_folder(*sid, *tid, false);
-                    } else if frac > 0.66 {
-                        sb.inner.library.drop_folder_near_folder(*sid, *tid, true);
-                    } else {
-                        sb.inner.library.drop_folder_into_folder(*sid, *tid);
-                    }
+                    sb.inner.library.drop_folder_near_folder(*sid, *tid, frac >= 0.5);
                 }
                 (RowRef::Folder(_), RowRef::Note { .. }) => return false,
             }
@@ -474,7 +491,8 @@ impl Sidebar {
         list_row.add_controller(target);
     }
 
-    fn row_menu(&self, rref: &RowRef) -> gtk::MenuButton {
+    fn row_menu(&self, rref: &RowRef, title: &str) -> gtk::MenuButton {
+        let title = title.to_string();
         let btn = gtk::MenuButton::builder()
             .icon_name("view-more-symbolic")
             .tooltip_text("Actions")
@@ -492,12 +510,10 @@ impl Sidebar {
             RowRef::Folder(id) => {
                 let id = *id;
                 let new_note = flat_button("New note here");
-                let new_sub = flat_button("New subfolder");
                 let rename = flat_button("Rename");
                 let del = flat_button("Delete folder");
                 del.add_css_class("destructive-action");
                 vbox.append(&new_note);
-                vbox.append(&new_sub);
                 vbox.append(&rename);
                 vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
                 vbox.append(&del);
@@ -514,24 +530,17 @@ impl Sidebar {
                 });
                 let sb = self.clone();
                 let pop = popover.clone();
-                new_sub.connect_clicked(move |_| {
-                    sb.inner.library.new_folder(Some(id));
-                    sb.refresh_idle();
-                    pop.popdown();
-                });
-                let sb = self.clone();
-                let pop = popover.clone();
-                let rid = RowRef::Folder(id);
+                let t = title.clone();
                 rename.connect_clicked(move |_| {
-                    sb.begin_rename(&rid);
                     pop.popdown();
+                    sb.prompt_rename_folder(id, &t);
                 });
                 let sb = self.clone();
                 let pop = popover.clone();
+                let t = title.clone();
                 del.connect_clicked(move |_| {
-                    sb.inner.library.delete_folder(id);
-                    sb.refresh_idle();
                     pop.popdown();
+                    sb.confirm_delete_folder(id, &t);
                 });
             }
             RowRef::Note { path } => {
@@ -545,43 +554,24 @@ impl Sidebar {
 
                 let sb = self.clone();
                 let pop = popover.clone();
-                let rref2 = RowRef::Note { path: path.clone() };
+                let p2 = path.clone();
+                let t = title.clone();
                 rename.connect_clicked(move |_| {
-                    sb.begin_rename(&rref2);
                     pop.popdown();
+                    sb.prompt_rename_note(&p2, &t);
                 });
                 let sb = self.clone();
                 let pop = popover.clone();
+                let t = title.clone();
                 del.connect_clicked(move |_| {
-                    if let Some(id) = note_id_from_path(&path) {
-                        sb.inner.library.delete_note(id);
-                        if sb.inner.selected.borrow().as_deref() == Some(path.as_path()) {
-                            *sb.inner.selected.borrow_mut() = None;
-                        }
-                        sb.refresh_idle();
-                    }
                     pop.popdown();
+                    sb.confirm_delete_note(&path, &t);
                 });
             }
         }
         popover.set_child(Some(&vbox));
         btn.set_popover(Some(&popover));
         btn
-    }
-
-    /// Put the row matching `rref` into inline-edit mode.
-    fn begin_rename(&self, rref: &RowRef) {
-        let refs = self.inner.row_refs.borrow();
-        let idx = refs.iter().position(|r| match (r, rref) {
-            (RowRef::Folder(a), RowRef::Folder(b)) => a == b,
-            (RowRef::Note { path: a }, RowRef::Note { path: b }) => a == b,
-            _ => false,
-        });
-        drop(refs);
-        if let Some(idx) = idx {
-            *self.inner.editing.borrow_mut() = Some(idx);
-            self.refresh_idle();
-        }
     }
 
     fn build_switcher_popover(&self, button: &gtk::MenuButton) {
@@ -594,17 +584,73 @@ impl Sidebar {
             vbox.set_margin_start(6);
             vbox.set_margin_end(6);
             for name in sb.inner.library.notebook_names() {
-                let row = flat_button(&name);
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+                let name_btn = flat_button(&name);
+                name_btn.set_hexpand(true);
                 let sb2 = sb.clone();
                 let pop = popover.clone();
                 let n = name.clone();
-                row.connect_clicked(move |_| {
+                name_btn.connect_clicked(move |_| {
                     sb2.inner.library.select_notebook(&n);
                     sb2.inner.notebook_label.set_text(&n);
                     *sb2.inner.selected.borrow_mut() = None;
                     sb2.refresh_idle();
                     pop.popdown();
                 });
+                row.append(&name_btn);
+
+                // Same ⋯ pattern as note/folder rows, acting on this notebook.
+                let kebab = gtk::MenuButton::builder()
+                    .icon_name("view-more-symbolic")
+                    .tooltip_text("Notebook actions")
+                    .build();
+                kebab.add_css_class("flat");
+                let kpop = gtk::Popover::new();
+                let kv = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                kv.set_margin_top(4);
+                kv.set_margin_bottom(4);
+                kv.set_margin_start(4);
+                kv.set_margin_end(4);
+                let ren = flat_button("Rename…");
+                let del = flat_button("Delete…");
+                del.add_css_class("destructive-action");
+                kv.append(&ren);
+                kv.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+                kv.append(&del);
+                kpop.set_child(Some(&kv));
+                kebab.set_popover(Some(&kpop));
+
+                // Acting on a notebook selects it first, then runs the flow.
+                let select_then = {
+                    let sb = sb.clone();
+                    let n = name.clone();
+                    move || {
+                        sb.inner.library.select_notebook(&n);
+                        sb.inner.notebook_label.set_text(&n);
+                        *sb.inner.selected.borrow_mut() = None;
+                        sb.refresh_idle();
+                    }
+                };
+                let sb2 = sb.clone();
+                let pop2 = popover.clone();
+                let kp = kpop.clone();
+                let st = select_then.clone();
+                ren.connect_clicked(move |_| {
+                    kp.popdown();
+                    pop2.popdown();
+                    st();
+                    sb2.prompt_rename_notebook();
+                });
+                let sb2 = sb.clone();
+                let pop2 = popover.clone();
+                let kp = kpop.clone();
+                del.connect_clicked(move |_| {
+                    kp.popdown();
+                    pop2.popdown();
+                    select_then();
+                    sb2.confirm_delete_notebook();
+                });
+                row.append(&kebab);
                 vbox.append(&row);
             }
             vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
@@ -687,39 +733,204 @@ impl Sidebar {
     }
 
     fn prompt_new_notebook(&self) {
-        let popover = gtk::Popover::new();
-        popover.set_parent(&self.widget);
-        popover.set_position(gtk::PositionType::Top);
-        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        vbox.set_margin_top(8);
-        vbox.set_margin_bottom(8);
-        vbox.set_margin_start(8);
-        vbox.set_margin_end(8);
+        // A dialog, not a popover: popovers opened while another popover is
+        // closing get dismissed by the grab teardown.
+        let dialog = adw::AlertDialog::new(Some("New notebook"), None);
         let entry = gtk::Entry::builder().placeholder_text("Notebook name").build();
-        let create = gtk::Button::with_label("Create");
-        create.add_css_class("suggested-action");
-        vbox.append(&entry);
-        vbox.append(&create);
-        popover.set_child(Some(&vbox));
-
+        entry.set_activates_default(true);
+        dialog.set_extra_child(Some(&entry));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("create", "Create");
+        dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("create"));
+        dialog.set_close_response("cancel");
         let sb = self.clone();
-        let pop = popover.clone();
-        let e = entry.clone();
-        let make = move || {
-            let name = e.text().trim().to_string();
+        dialog.connect_response(None, move |_, resp| {
+            if resp != "create" {
+                return;
+            }
+            let name = entry.text().trim().to_string();
             if !name.is_empty() {
                 sb.inner.library.create_notebook(&name);
                 sb.inner.notebook_label.set_text(&name);
                 *sb.inner.selected.borrow_mut() = None;
                 sb.refresh_idle();
             }
-            pop.popdown();
-        };
-        let m = make.clone();
-        create.connect_clicked(move |_| m());
-        entry.connect_activate(move |_| make());
-        popover.popup();
+        });
+        let win = self.widget.root().and_downcast::<gtk::Window>();
+        dialog.present(win.as_ref());
+    }
+}
+
+impl Sidebar {
+    /// Shared name dialog used by folder/note rename.
+    fn name_dialog(&self, heading: &str, initial: &str, verb: &str, on_commit: impl Fn(&str) + 'static) {
+        let dialog = adw::AlertDialog::new(Some(heading), None);
+        let entry = gtk::Entry::new();
+        entry.set_text(initial);
+        entry.set_activates_default(true);
+        dialog.set_extra_child(Some(&entry));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("ok", verb);
+        dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("ok"));
+        dialog.set_close_response("cancel");
+        let e = entry.clone();
+        dialog.connect_response(None, move |_, resp| {
+            if resp == "ok" {
+                let name = e.text().trim().to_string();
+                if !name.is_empty() {
+                    on_commit(&name);
+                }
+            }
+        });
+        let win = self.widget.root().and_downcast::<gtk::Window>();
+        dialog.present(win.as_ref());
         entry.grab_focus();
+    }
+
+    fn prompt_rename_folder(&self, id: FolderId, current: &str) {
+        let sb = self.clone();
+        self.name_dialog("Rename folder", current, "Rename", move |name| {
+            sb.inner.library.rename_folder(id, name);
+            sb.refresh_idle();
+        });
+    }
+
+    fn prompt_rename_note(&self, path: &Path, current: &str) {
+        let sb = self.clone();
+        let path = path.to_path_buf();
+        self.name_dialog("Rename note", current, "Rename", move |name| {
+            let routed = sb
+                .inner
+                .on_rename_note
+                .borrow()
+                .as_ref()
+                .map(|cb| cb(&path, name))
+                .is_some();
+            if !routed {
+                sb.inner.library.rename_note_on_disk(&path, name);
+            }
+            sb.refresh_idle();
+        });
+    }
+
+    fn confirm_delete_note(&self, path: &Path, title: &str) {
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Delete “{title}”?")),
+            Some("The note moves to the notebook's trash."),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("delete", "Delete note");
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        let sb = self.clone();
+        let path = path.to_path_buf();
+        dialog.connect_response(None, move |_, resp| {
+            if resp != "delete" {
+                return;
+            }
+            if let Some(id) = note_id_from_path(&path) {
+                sb.inner.library.delete_note(id);
+                if sb.inner.selected.borrow().as_deref() == Some(path.as_path()) {
+                    *sb.inner.selected.borrow_mut() = None;
+                }
+                sb.refresh_idle();
+            }
+        });
+        let win = self.widget.root().and_downcast::<gtk::Window>();
+        dialog.present(win.as_ref());
+    }
+
+    fn confirm_delete_folder(&self, id: FolderId, title: &str) {
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Delete “{title}”?")),
+            Some("The folder moves to the trash; its notes move up one level."),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("delete", "Delete folder");
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        let sb = self.clone();
+        dialog.connect_response(None, move |_, resp| {
+            if resp != "delete" {
+                return;
+            }
+            sb.inner.library.delete_folder(id);
+            sb.refresh_idle();
+        });
+        let win = self.widget.root().and_downcast::<gtk::Window>();
+        dialog.present(win.as_ref());
+    }
+
+    fn prompt_rename_notebook(&self) {
+        let current = self.inner.library.current_notebook_name();
+        let dialog = adw::AlertDialog::new(Some("Rename notebook"), None);
+        let entry = gtk::Entry::new();
+        entry.set_text(&current);
+        entry.set_activates_default(true);
+        dialog.set_extra_child(Some(&entry));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("rename", "Rename");
+        dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("rename"));
+        dialog.set_close_response("cancel");
+        let sb = self.clone();
+        let entry2 = entry.clone();
+        dialog.connect_response(None, move |_, resp| {
+            if resp != "rename" {
+                return;
+            }
+            let name = entry2.text().trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            if let Some((old_dir, new_dir)) = sb.inner.library.rename_current_notebook(&name) {
+                sb.inner.notebook_label.set_text(&name);
+                // Selected note path moved with the directory.
+                let moved = sb.inner.selected.borrow().as_ref().and_then(|p| {
+                    p.strip_prefix(&old_dir).ok().map(|rest| new_dir.join(rest))
+                });
+                if let Some(m) = moved {
+                    *sb.inner.selected.borrow_mut() = Some(m);
+                }
+                sb.refresh_idle();
+                if let Some(cb) = sb.inner.on_notebook_renamed.borrow().as_ref() {
+                    cb(&old_dir, &new_dir);
+                }
+            }
+        });
+        let win = self.widget.root().and_downcast::<gtk::Window>();
+        dialog.present(win.as_ref());
+        entry.grab_focus();
+    }
+
+    fn confirm_delete_notebook(&self) {
+        let name = self.inner.library.current_notebook_name();
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Delete “{name}”?")),
+            Some("The notebook and all its notes move to the trash folder inside your notebooks directory."),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("delete", "Delete notebook");
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        let sb = self.clone();
+        dialog.connect_response(None, move |_, resp| {
+            if resp != "delete" {
+                return;
+            }
+            if let Some(old_dir) = sb.inner.library.delete_current_notebook() {
+                *sb.inner.selected.borrow_mut() = None;
+                sb.inner.notebook_label.set_text(&sb.inner.library.current_notebook_name());
+                sb.refresh();
+                if let Some(cb) = sb.inner.on_notebook_deleted.borrow().as_ref() {
+                    cb(&old_dir);
+                }
+            }
+        });
+        let win = self.widget.root().and_downcast::<gtk::Window>();
+        dialog.present(win.as_ref());
     }
 }
 

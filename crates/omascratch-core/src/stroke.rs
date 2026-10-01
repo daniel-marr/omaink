@@ -24,6 +24,9 @@ pub enum Tool {
     Pen,
     Pencil,
     Highlighter,
+    /// A drawn shape: rendered as a clean constant-width stroked path, not a
+    /// pressure outline, so lines stay straight and corners stay crisp.
+    Shape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

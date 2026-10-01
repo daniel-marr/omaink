@@ -6,26 +6,110 @@
 //! redraw; geometry runs once per frame in `snapshot()`.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Instant, SystemTime};
 
 use gtk4 as gtk;
 use gtk4::{gdk, glib, graphene, gsk, prelude::*, subclass::prelude::*};
 use kurbo::PathEl;
 
-use omascratch_core::{Command, InkPoint, NoteSession, SemanticColor, Stroke, StrokeId, Tool};
+use omascratch_core::{BackgroundKind, Command, InkPoint, NoteSession, PageBackground, Rgba, SemanticColor, Stroke, StrokeId, Tool};
 
 // M1 fixed palette (Tokyo Night-ish). Replaced by the Omarchy theme adapter in M5.
 const BG: gdk::RGBA = gdk::RGBA::new(0.102, 0.106, 0.149, 1.0);
+const BG_LIGHT: gdk::RGBA = gdk::RGBA::new(0.925, 0.93, 0.955, 1.0);
 const INK: gdk::RGBA = gdk::RGBA::new(0.753, 0.792, 0.961, 1.0);
+const INK_DARK: gdk::RGBA = gdk::RGBA::new(0.14, 0.15, 0.22, 1.0);
+const ACCENT: gdk::RGBA = gdk::RGBA::new(0.478, 0.635, 0.968, 1.0);
+const RULE_DARK: gdk::RGBA = gdk::RGBA::new(0.26, 0.29, 0.40, 0.85);
+const RULE_LIGHT: gdk::RGBA = gdk::RGBA::new(0.55, 0.63, 0.80, 0.75);
+const MARGIN_DARK: gdk::RGBA = gdk::RGBA::new(0.72, 0.36, 0.42, 0.85);
+const MARGIN_LIGHT: gdk::RGBA = gdk::RGBA::new(0.84, 0.36, 0.42, 0.85);
 const DEBUG_TEXT: gdk::RGBA = gdk::RGBA::new(1.0, 0.62, 0.39, 1.0);
 const DEBUG_BG: gdk::RGBA = gdk::RGBA::new(0.0, 0.0, 0.0, 0.55);
+
+/// Live canvas colors, derived from the Omarchy palette by the theme manager.
+#[derive(Clone, Copy)]
+pub struct CanvasPalette {
+    pub bg: gdk::RGBA,
+    pub bg_inv: gdk::RGBA,
+    pub ink: gdk::RGBA,
+    pub ink_inv: gdk::RGBA,
+    pub accent: gdk::RGBA,
+    pub rule: gdk::RGBA,
+    pub rule_inv: gdk::RGBA,
+    pub margin: gdk::RGBA,
+    pub margin_inv: gdk::RGBA,
+}
+
+impl Default for CanvasPalette {
+    fn default() -> Self {
+        Self {
+            bg: BG,
+            bg_inv: BG_LIGHT,
+            ink: INK,
+            ink_inv: INK_DARK,
+            accent: ACCENT,
+            rule: RULE_DARK,
+            rule_inv: RULE_LIGHT,
+            margin: MARGIN_DARK,
+            margin_inv: MARGIN_LIGHT,
+        }
+    }
+}
 
 const ZOOM_MIN: f64 = 0.1;
 const ZOOM_MAX: f64 = 16.0;
 
+/// Which tool the pointer currently drives. Pen/Pencil/Highlighter carry the
+/// current color and width in the canvas state (set from the selected preset).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ActiveTool {
+    Pen,
+    Pencil,
+    Highlighter,
+    Eraser,
+    /// Pointer: click a stroke to select it, drag a selection to move it.
+    Select,
+    /// Freehand lasso: encircled strokes become the selection.
+    Lasso,
+    /// Drag out a shape (kind held in `State::shape_kind`).
+    Shape,
+    /// Hand tool: drag anywhere to pan the canvas.
+    Pan,
+}
+
+impl ActiveTool {
+    fn as_draw_tool(self) -> Option<Tool> {
+        match self {
+            ActiveTool::Pen => Some(Tool::Pen),
+            ActiveTool::Pencil => Some(Tool::Pencil),
+            ActiveTool::Highlighter => Some(Tool::Highlighter),
+            _ => None,
+        }
+    }
+}
+
+/// OneNote eraser types: stroke eraser removes whole strokes; area erasers
+/// rub out samples, splitting strokes into fragments.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EraserKind {
+    Stroke,
+    Area,
+}
+
+fn tool_to_active(tool: Tool) -> ActiveTool {
+    match tool {
+        Tool::Pen => ActiveTool::Pen,
+        Tool::Pencil => ActiveTool::Pencil,
+        Tool::Highlighter => ActiveTool::Highlighter,
+        Tool::Shape => ActiveTool::Shape,
+    }
+}
+
 struct LiveStroke {
     tool: Tool,
+    color: SemanticColor,
     width: f64,
     points: Vec<InkPoint>,
     started: Instant,
@@ -42,6 +126,7 @@ struct DebugStats {
     max_pressure: f64,
     last_tilt: (f64, f64),
     tool_name: String,
+    buttons: String,
     sample_times: VecDeque<Instant>,
 }
 
@@ -50,14 +135,47 @@ pub struct State {
     /// Shell-installed hook, fired after every content change (used to
     /// schedule autosave). Never called while `state` is borrowed.
     on_change: Option<Box<dyn Fn()>>,
+    /// Shell hook: zoom changed (drives the toolbar's zoom indicator).
+    on_zoom: Option<Box<dyn Fn(f64)>>,
+    /// Shell hook: stylus barrel button clicked — toolbar toggles the eraser.
+    on_eraser_toggle: Option<Box<dyn Fn()>>,
     /// World coordinate at the widget's top-left corner.
     offset: kurbo::Vec2,
     zoom: f64,
     live: Option<LiveStroke>,
     /// Committed-stroke render nodes, rebuilt lazily per stroke.
     node_cache: HashMap<StrokeId, gsk::RenderNode>,
-    tool: Tool,
-    stroke_width: f64,
+    active: ActiveTool,
+    cur_color: SemanticColor,
+    cur_width: f64,
+    eraser_kind: EraserKind,
+    eraser_radius: f64,
+    /// Strokes the current eraser drag affects (stroke eraser: hidden live;
+    /// area eraser: previewed as fragments). Committed on release.
+    erasing: bool,
+    live_erased: HashSet<StrokeId>,
+    /// World-space eraser path for the area eraser (thinned).
+    erase_path: Vec<kurbo::Point>,
+    /// Current selection + in-progress selection gestures.
+    selection: HashSet<StrokeId>,
+    lassoing: bool,
+    lasso_path: Vec<kurbo::Point>,
+    /// While dragging a selection: last world point + accumulated offset.
+    sel_drag: Option<kurbo::Point>,
+    sel_offset: kurbo::Vec2,
+    /// Shape tool state.
+    shape_kind: omascratch_ink::ShapeKind,
+    shape_drag: Option<(kurbo::Point, kurbo::Point)>,
+    /// Shift held: constrain shapes (square/circle, 45-degree lines).
+    shift_down: bool,
+    /// Hand-tool drag: (start widget x, start widget y, offset at start).
+    panning: Option<(f64, f64, kurbo::Vec2)>,
+    /// App-internal stroke clipboard (copy/cut/paste of selections).
+    clipboard: Vec<Stroke>,
+    /// Light-canvas inversion (page + semantic ink flip; fixed colors stay).
+    inverted: bool,
+    background: PageBackground,
+    palette: CanvasPalette,
     pan_anchor: Option<kurbo::Vec2>,
     pointer: (f64, f64),
     debug: DebugStats,
@@ -68,12 +186,33 @@ impl Default for State {
         Self {
             session: NoteSession::default(),
             on_change: None,
+            on_zoom: None,
+            on_eraser_toggle: None,
             offset: kurbo::Vec2::ZERO,
             zoom: 1.0,
             live: None,
             node_cache: HashMap::new(),
-            tool: Tool::Pen,
-            stroke_width: 3.5,
+            active: ActiveTool::Pen,
+            cur_color: SemanticColor::Foreground,
+            cur_width: 3.5,
+            eraser_kind: EraserKind::Stroke,
+            eraser_radius: 12.0,
+            erasing: false,
+            live_erased: HashSet::new(),
+            erase_path: Vec::new(),
+            selection: HashSet::new(),
+            lassoing: false,
+            lasso_path: Vec::new(),
+            sel_drag: None,
+            sel_offset: kurbo::Vec2::ZERO,
+            shape_kind: omascratch_ink::ShapeKind::Line,
+            shape_drag: None,
+            shift_down: false,
+            panning: None,
+            clipboard: Vec::new(),
+            inverted: false,
+            background: PageBackground::default(),
+            palette: CanvasPalette::default(),
             pan_anchor: None,
             pointer: (0.0, 0.0),
             debug: DebugStats::default(),
@@ -147,6 +286,46 @@ fn bezpath_to_gsk(path: &kurbo::BezPath) -> gsk::Path {
     b.to_path()
 }
 
+/// Shift constraint: squares/circles for rect/ellipse, 45-degree snapping
+/// for lines and arrows.
+fn constrain_shape(kind: omascratch_ink::ShapeKind, start: kurbo::Point, end: kurbo::Point) -> kurbo::Point {
+    use omascratch_ink::ShapeKind;
+    let d = end - start;
+    match kind {
+        ShapeKind::Rect | ShapeKind::Ellipse => {
+            let m = d.x.abs().max(d.y.abs());
+            kurbo::Point::new(start.x + m * d.x.signum(), start.y + m * d.y.signum())
+        }
+        ShapeKind::Line | ShapeKind::Arrow => {
+            let len = d.hypot();
+            if len < 1e-6 {
+                return end;
+            }
+            let step = std::f64::consts::FRAC_PI_4;
+            let angle = (d.y.atan2(d.x) / step).round() * step;
+            kurbo::Point::new(start.x + len * angle.cos(), start.y + len * angle.sin())
+        }
+    }
+}
+
+fn polyline_to_gsk(points: &[InkPoint]) -> gsk::Path {
+    let b = gsk::PathBuilder::new();
+    if let Some(first) = points.first() {
+        b.move_to(first.x as f32, first.y as f32);
+        for p in &points[1..] {
+            b.line_to(p.x as f32, p.y as f32);
+        }
+    }
+    b.to_path()
+}
+
+fn shape_stroke(width: f64) -> gsk::Stroke {
+    let s = gsk::Stroke::new(width as f32);
+    s.set_line_cap(gsk::LineCap::Round);
+    s.set_line_join(gsk::LineJoin::Round);
+    s
+}
+
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -154,20 +333,71 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Resolve a semantic color to an on-screen RGBA. Highlighter strokes render
+/// translucent. (M5's theme adapter will replace the fixed Foreground/Accent.)
+fn resolve_color_inv(c: SemanticColor, tool: Tool, inverted: bool, pal: &CanvasPalette) -> gdk::RGBA {
+    let page = if inverted { pal.bg_inv } else { pal.bg };
+    let page_dark = luminance(page.red(), page.green(), page.blue()) < 0.5;
+    let base = match c {
+        SemanticColor::Foreground => {
+            if inverted {
+                pal.ink_inv
+            } else {
+                pal.ink
+            }
+        }
+        SemanticColor::Accent => pal.accent,
+        SemanticColor::Fixed(Rgba { r, g, b, a }) => {
+            // Neutral inks (black/white/greys) track the page polarity like
+            // OneNote's automatic ink color: black on light paper renders
+            // white on a dark page and vice versa. Colored inks stay put.
+            let chroma = r.max(g).max(b) - r.min(g).min(b);
+            if chroma < 0.12 {
+                let lum = luminance(r, g, b);
+                let clash = (page_dark && lum < 0.4) || (!page_dark && lum > 0.6);
+                if clash {
+                    return apply_highlight_alpha(gdk::RGBA::new(1.0 - r, 1.0 - g, 1.0 - b, a), tool);
+                }
+            }
+            gdk::RGBA::new(r, g, b, a)
+        }
+    };
+    apply_highlight_alpha(base, tool)
+}
+
+fn luminance(r: f32, g: f32, b: f32) -> f32 {
+    0.299 * r + 0.587 * g + 0.114 * b
+}
+
+fn apply_highlight_alpha(base: gdk::RGBA, tool: Tool) -> gdk::RGBA {
+    if matches!(tool, Tool::Highlighter) {
+        gdk::RGBA::new(base.red(), base.green(), base.blue(), base.alpha() * 0.4)
+    } else {
+        base
+    }
+}
+
 impl CanvasView {
     // ---- public API used by the shell ----
 
     pub fn undo(&self) {
-        let changed = self.imp().state.borrow_mut().session.undo();
+        let mut st = self.imp().state.borrow_mut();
+        let changed = st.session.undo();
         if changed {
+            // A translate keeps ids but moves points; drop all cached nodes.
+            st.node_cache.clear();
+            drop(st);
             self.queue_draw();
             self.notify_changed();
         }
     }
 
     pub fn redo(&self) {
-        let changed = self.imp().state.borrow_mut().session.redo();
+        let mut st = self.imp().state.borrow_mut();
+        let changed = st.session.redo();
         if changed {
+            st.node_cache.clear();
+            drop(st);
             self.queue_draw();
             self.notify_changed();
         }
@@ -180,8 +410,21 @@ impl CanvasView {
         st.session = NoteSession::new(content);
         st.node_cache.clear();
         st.live = None;
+        st.erasing = false;
+        st.live_erased.clear();
+        st.selection.clear();
+        st.lassoing = false;
+        st.lasso_path.clear();
+        st.sel_drag = None;
+        st.sel_offset = kurbo::Vec2::ZERO;
+        st.shape_drag = None;
+        st.panning = None;
+        // A fresh note opens at its top-left home at 100%.
+        st.offset = kurbo::Vec2::ZERO;
+        st.zoom = 1.0;
         drop(st);
         self.queue_draw();
+        self.notify_zoom();
     }
 
     /// Current revision + a clone of the content, for a generation-tagged save.
@@ -196,6 +439,230 @@ impl CanvasView {
 
     pub fn set_on_change(&self, f: impl Fn() + 'static) {
         self.imp().state.borrow_mut().on_change = Some(Box::new(f));
+    }
+
+    pub fn set_on_zoom(&self, f: impl Fn(f64) + 'static) {
+        self.imp().state.borrow_mut().on_zoom = Some(Box::new(f));
+    }
+
+    pub fn set_on_eraser_toggle(&self, f: impl Fn() + 'static) {
+        self.imp().state.borrow_mut().on_eraser_toggle = Some(Box::new(f));
+    }
+
+    fn fire_eraser_toggle(&self) {
+        let hook = self.imp().state.borrow_mut().on_eraser_toggle.take();
+        if let Some(hook) = hook {
+            hook();
+            let mut st = self.imp().state.borrow_mut();
+            if st.on_eraser_toggle.is_none() {
+                st.on_eraser_toggle = Some(hook);
+            }
+        }
+    }
+
+    fn notify_zoom(&self) {
+        let zoom = self.imp().state.borrow().zoom;
+        let hook = self.imp().state.borrow_mut().on_zoom.take();
+        if let Some(hook) = hook {
+            hook(zoom);
+            let mut st = self.imp().state.borrow_mut();
+            if st.on_zoom.is_none() {
+                st.on_zoom = Some(hook);
+            }
+        }
+    }
+
+    /// Return to 100% zoom, anchored at the viewport center.
+    pub fn zoom_to_100(&self) {
+        let mut st = self.imp().state.borrow_mut();
+        let old = st.zoom;
+        if (old - 1.0).abs() < f64::EPSILON {
+            return;
+        }
+        let (w, h) = (self.width() as f64 / 2.0, self.height() as f64 / 2.0);
+        let before = kurbo::Vec2::new(w / old, h / old);
+        let after = kurbo::Vec2::new(w, h);
+        st.offset += before - after;
+        st.zoom = 1.0;
+        Self::clamp_offset(&mut st);
+        drop(st);
+        self.queue_draw();
+        self.notify_zoom();
+    }
+
+    // ---- tool selection (driven by the draw toolbar) ----
+
+    pub fn set_active_tool(&self, tool: ActiveTool) {
+        self.imp().state.borrow_mut().active = tool;
+    }
+
+    pub fn active_tool(&self) -> ActiveTool {
+        self.imp().state.borrow().active
+    }
+
+    /// Select a pen preset: sets the active drawing tool, color and width.
+    pub fn set_pen(&self, tool: Tool, color: SemanticColor, width: f64) {
+        let mut st = self.imp().state.borrow_mut();
+        st.active = tool_to_active(tool);
+        st.cur_color = color;
+        st.cur_width = width;
+    }
+
+    /// Activate the shape tool with the given shape kind.
+    pub fn set_shape_tool(&self, kind: omascratch_ink::ShapeKind) {
+        let mut st = self.imp().state.borrow_mut();
+        st.active = ActiveTool::Shape;
+        st.shape_kind = kind;
+    }
+
+    /// Install a new canvas palette (theme switch). Clears the render cache.
+    pub fn set_palette(&self, palette: CanvasPalette) {
+        let mut st = self.imp().state.borrow_mut();
+        st.palette = palette;
+        st.node_cache.clear();
+        drop(st);
+        self.queue_draw();
+    }
+
+    /// Resolve a semantic color for toolbar previews (non-inverted view).
+    pub fn preview_rgba(&self, c: SemanticColor) -> gdk::RGBA {
+        let st = self.imp().state.borrow();
+        match c {
+            SemanticColor::Foreground => st.palette.ink,
+            SemanticColor::Accent => st.palette.accent,
+            SemanticColor::Fixed(Rgba { r, g, b, a }) => gdk::RGBA::new(r, g, b, a),
+        }
+    }
+
+    pub fn set_inverted(&self, inverted: bool) {
+        let mut st = self.imp().state.borrow_mut();
+        if st.inverted != inverted {
+            st.inverted = inverted;
+            st.node_cache.clear();
+            drop(st);
+            self.queue_draw();
+        }
+    }
+
+    pub fn inverted(&self) -> bool {
+        self.imp().state.borrow().inverted
+    }
+
+    pub fn set_background(&self, bg: PageBackground) {
+        self.imp().state.borrow_mut().background = bg;
+        self.queue_draw();
+    }
+
+    pub fn background(&self) -> PageBackground {
+        self.imp().state.borrow().background
+    }
+
+    /// Update the current drawing color/width without changing the tool
+    /// (used by the shapes flyout).
+    pub fn set_draw_style(&self, color: SemanticColor, width: f64) {
+        let mut st = self.imp().state.borrow_mut();
+        st.cur_color = color;
+        st.cur_width = width;
+    }
+
+    /// Copy the selection into the app clipboard. Returns stroke count.
+    pub fn copy_selection(&self) -> usize {
+        let mut st = self.imp().state.borrow_mut();
+        let copied: Vec<Stroke> = st
+            .session
+            .content
+            .strokes
+            .iter()
+            .filter(|s| st.selection.contains(&s.id))
+            .cloned()
+            .collect();
+        let n = copied.len();
+        if n > 0 {
+            st.clipboard = copied;
+        }
+        n
+    }
+
+    pub fn cut_selection(&self) {
+        if self.copy_selection() > 0 {
+            self.delete_selection();
+        }
+    }
+
+    /// Paste the app clipboard slightly offset, select the pasted strokes.
+    pub fn paste_clipboard(&self) {
+        let mut st = self.imp().state.borrow_mut();
+        if st.clipboard.is_empty() {
+            return;
+        }
+        let offset = 24.0 / st.zoom;
+        let pasted: Vec<Stroke> = st
+            .clipboard
+            .iter()
+            .map(|s| {
+                let mut c = s.clone();
+                c.id = StrokeId::new();
+                for p in &mut c.points {
+                    p.x += offset;
+                    p.y += offset;
+                }
+                c
+            })
+            .collect();
+        st.selection = pasted.iter().map(|s| s.id).collect();
+        st.session.dispatch(Command::AddStrokes(pasted));
+        drop(st);
+        self.queue_draw();
+        self.notify_changed();
+    }
+
+    pub fn clipboard_has_strokes(&self) -> bool {
+        !self.imp().state.borrow().clipboard.is_empty()
+    }
+
+    pub fn clear_selection(&self) {
+        let mut st = self.imp().state.borrow_mut();
+        st.selection.clear();
+        st.sel_drag = None;
+        st.sel_offset = kurbo::Vec2::ZERO;
+        drop(st);
+        self.queue_draw();
+    }
+
+    pub fn has_selection(&self) -> bool {
+        !self.imp().state.borrow().selection.is_empty()
+    }
+
+    /// Delete the current selection as one undoable command.
+    pub fn delete_selection(&self) {
+        let mut st = self.imp().state.borrow_mut();
+        if st.selection.is_empty() {
+            return;
+        }
+        let ids: Vec<StrokeId> = st.selection.drain().collect();
+        let removed: Vec<Stroke> = ids
+            .iter()
+            .filter_map(|id| st.session.content.stroke_index(*id).map(|i| st.session.content.strokes[i].clone()))
+            .collect();
+        for id in &ids {
+            st.node_cache.remove(id);
+        }
+        if !removed.is_empty() {
+            st.session.dispatch(Command::EraseStrokes { removed, replacements: vec![] });
+        }
+        drop(st);
+        self.queue_draw();
+        self.notify_changed();
+    }
+
+    /// Configure and activate the eraser.
+    pub fn set_eraser(&self, kind: EraserKind, radius: f64) {
+        let mut st = self.imp().state.borrow_mut();
+        st.active = ActiveTool::Eraser;
+        st.eraser_kind = kind;
+        st.eraser_radius = radius;
+        drop(st);
+        self.queue_draw();
     }
 
     fn notify_changed(&self) {
@@ -224,6 +691,7 @@ impl CanvasView {
         st.zoom = 1.0;
         drop(st);
         self.queue_draw();
+        self.notify_zoom();
     }
 
     // ---- input wiring ----
@@ -240,6 +708,8 @@ impl CanvasView {
         let weak = self.downgrade();
         stylus.connect_motion(move |g, x, y| {
             if let Some(view) = weak.upgrade() {
+                view.imp().state.borrow_mut().shift_down =
+                    g.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
                 view.stylus_motion(g, x, y);
             }
         });
@@ -271,6 +741,8 @@ impl CanvasView {
             if g.current_event().and_then(|ev| ev.device_tool()).is_some() {
                 return;
             }
+            view.imp().state.borrow_mut().shift_down =
+                g.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
             if let Some((sx, sy)) = g.start_point() {
                 view.mouse_point(sx + dx, sy + dy);
             }
@@ -289,24 +761,50 @@ impl CanvasView {
         let pan = gtk::GestureDrag::new();
         pan.set_button(gdk::BUTTON_MIDDLE);
         let weak = self.downgrade();
-        pan.connect_drag_begin(move |_, _, _| {
+        pan.connect_drag_begin(move |g, _, _| {
+            // Stylus barrel buttons emulate middle-click; they must never pan.
+            if g.current_event().and_then(|ev| ev.device_tool()).is_some() {
+                return;
+            }
             if let Some(view) = weak.upgrade() {
                 let mut st = view.imp().state.borrow_mut();
                 st.pan_anchor = Some(st.offset);
             }
         });
         let weak = self.downgrade();
-        pan.connect_drag_update(move |_, dx, dy| {
+        pan.connect_drag_update(move |g, dx, dy| {
             let Some(view) = weak.upgrade() else { return };
+            if g.current_event().and_then(|ev| ev.device_tool()).is_some() {
+                return;
+            }
             let mut st = view.imp().state.borrow_mut();
             if let Some(anchor) = st.pan_anchor {
                 let zoom = st.zoom;
                 st.offset = anchor - kurbo::Vec2::new(dx, dy) / zoom;
+                Self::clamp_offset(&mut st);
                 drop(st);
                 view.queue_draw();
             }
         });
+        pan.connect_drag_end(move |_, _, _| {});
         self.add_controller(pan);
+
+        // Stylus barrel click (arrives as middle/secondary with a device
+        // tool): toggle the eraser instead of panning or context-clicking.
+        for button in [gdk::BUTTON_MIDDLE, gdk::BUTTON_SECONDARY] {
+            let click = gtk::GestureClick::new();
+            click.set_button(button);
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let weak = self.downgrade();
+            click.connect_pressed(move |g, _, _, _| {
+                let Some(view) = weak.upgrade() else { return };
+                if g.current_event().and_then(|ev| ev.device_tool()).is_some() {
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                    view.fire_eraser_toggle();
+                }
+            });
+            self.add_controller(click);
+        }
 
         // Scroll = pan; Ctrl+scroll = zoom around the pointer.
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
@@ -324,6 +822,7 @@ impl CanvasView {
                 let mut st = view.imp().state.borrow_mut();
                 let step = 40.0 / st.zoom;
                 st.offset += kurbo::Vec2::new(dx * step, dy * step);
+                Self::clamp_offset(&mut st);
                 drop(st);
                 view.queue_draw();
             }
@@ -342,6 +841,18 @@ impl CanvasView {
         self.add_controller(motion);
     }
 
+    /// The canvas is pinned at a top-left home: the viewport never scrolls
+    /// above or left of the page origin, so the margin and rule lines always
+    /// have a fixed home regardless of pan/zoom.
+    fn clamp_offset(st: &mut State) {
+        if st.offset.x < 0.0 {
+            st.offset.x = 0.0;
+        }
+        if st.offset.y < 0.0 {
+            st.offset.y = 0.0;
+        }
+    }
+
     fn zoom_by(&self, factor: f64) {
         let mut st = self.imp().state.borrow_mut();
         let old = st.zoom;
@@ -355,8 +866,10 @@ impl CanvasView {
         let after = kurbo::Vec2::new(px / new, py / new);
         st.offset += before - after;
         st.zoom = new;
+        Self::clamp_offset(&mut st);
         drop(st);
         self.queue_draw();
+        self.notify_zoom();
     }
 
     // ---- stroke input ----
@@ -367,27 +880,132 @@ impl CanvasView {
 
     fn stylus_begin(&self, g: &gtk::GestureStylus, x: f64, y: f64) {
         self.grab_focus();
+        let state = g.current_event_state();
+        // XP-Pen barrel buttons arrive as middle/secondary button masks (or an
+        // eraser-type tool). Holding one at pen-down erases for that stroke.
+        let barrel = state.intersects(
+            gdk::ModifierType::BUTTON2_MASK | gdk::ModifierType::BUTTON3_MASK,
+        );
         let mut st = self.imp().state.borrow_mut();
-        let tool = st.tool;
-        let width = st.stroke_width;
+        let mut force_erase = barrel;
         if let Some(t) = g.device_tool() {
             st.debug.tool_name = format!("{:?}", t.tool_type());
+            if t.tool_type() == gdk::DeviceToolType::Eraser {
+                force_erase = true;
+            }
         }
-        st.live = Some(LiveStroke {
-            tool,
-            width,
-            points: Vec::with_capacity(256),
-            started: Instant::now(),
-            t0_ms: now_unix_ms(),
-            simulate_pressure: false,
-        });
+        st.debug.buttons = format!(
+            "b1:{} b2:{} b3:{}",
+            state.contains(gdk::ModifierType::BUTTON1_MASK) as u8,
+            state.contains(gdk::ModifierType::BUTTON2_MASK) as u8,
+            state.contains(gdk::ModifierType::BUTTON3_MASK) as u8,
+        );
+        Self::begin_locked(&mut st, x, y, false);
+        if force_erase && st.active.as_draw_tool().is_some() {
+            // Override the drawing gesture with a temporary eraser drag; the
+            // selected tool (and its toolbar underline) stay unchanged.
+            st.live = None;
+            st.erasing = true;
+            st.live_erased.clear();
+            st.erase_path.clear();
+        }
         drop(st);
         self.push_stylus_point(g, x, y);
     }
 
+    /// Start the gesture appropriate for the active tool at widget (x, y).
+    fn begin_locked(st: &mut State, x: f64, y: f64, is_mouse: bool) {
+        let (wx, wy) = Self::widget_to_world(st, x, y);
+        let wp = kurbo::Point::new(wx, wy);
+        st.sel_drag = None;
+        match st.active {
+            ActiveTool::Pen | ActiveTool::Pencil | ActiveTool::Highlighter => {
+                let tool = st.active.as_draw_tool().unwrap();
+                st.erasing = false;
+                st.live = Some(LiveStroke {
+                    tool,
+                    color: st.cur_color,
+                    width: st.cur_width,
+                    points: Vec::with_capacity(256),
+                    started: Instant::now(),
+                    t0_ms: now_unix_ms(),
+                    simulate_pressure: is_mouse,
+                });
+            }
+            ActiveTool::Eraser => {
+                st.erasing = true;
+                st.live = None;
+                st.live_erased.clear();
+                st.erase_path.clear();
+            }
+            ActiveTool::Lasso => {
+                if Self::selection_bounds(st).is_some_and(|b| b.contains(wp)) {
+                    // Drag inside the selection moves it.
+                    st.sel_drag = Some(wp);
+                    st.sel_offset = kurbo::Vec2::ZERO;
+                } else {
+                    st.lassoing = true;
+                    st.lasso_path.clear();
+                    st.lasso_path.push(wp);
+                }
+            }
+            ActiveTool::Select => {
+                if Self::selection_bounds(st).is_some_and(|b| b.contains(wp)) {
+                    st.sel_drag = Some(wp);
+                    st.sel_offset = kurbo::Vec2::ZERO;
+                } else {
+                    // Click a stroke to select it (and immediately allow dragging).
+                    let radius = 6.0 / st.zoom;
+                    let hit = st
+                        .session
+                        .content
+                        .strokes
+                        .iter()
+                        .rev()
+                        .find(|s| omascratch_ink::stroke_hit(&s.points, s.width, wp, radius))
+                        .map(|s| s.id);
+                    st.selection.clear();
+                    if let Some(id) = hit {
+                        st.selection.insert(id);
+                        st.sel_drag = Some(wp);
+                        st.sel_offset = kurbo::Vec2::ZERO;
+                    }
+                }
+            }
+            ActiveTool::Shape => {
+                st.shape_drag = Some((wp, wp));
+            }
+            ActiveTool::Pan => {
+                st.panning = Some((x, y, st.offset));
+            }
+        }
+    }
+
+    /// Union bounds of the selected strokes (without any drag offset).
+    fn selection_bounds(st: &State) -> Option<kurbo::Rect> {
+        let mut out: Option<kurbo::Rect> = None;
+        for s in &st.session.content.strokes {
+            if st.selection.contains(&s.id) {
+                if let Some(b) = s.bounds() {
+                    out = Some(out.map_or(b, |o| o.union(b)));
+                }
+            }
+        }
+        out
+    }
+
     fn stylus_motion(&self, g: &gtk::GestureStylus, x: f64, y: f64) {
-        if self.imp().state.borrow().live.is_none() {
-            return;
+        {
+            let st = self.imp().state.borrow();
+            let gesture_active = st.live.is_some()
+                || st.erasing
+                || st.lassoing
+                || st.sel_drag.is_some()
+                || st.shape_drag.is_some()
+                || st.panning.is_some();
+            if !gesture_active {
+                return;
+            }
         }
         // Drain the uncompressed event history first (GTK compresses plain
         // motion events; the backlog preserves every stylus sample).
@@ -416,8 +1034,65 @@ impl CanvasView {
         self.queue_draw();
     }
 
+    fn erase_at(st: &mut State, wx: f64, wy: f64) {
+        let radius = st.eraser_radius;
+        let p = kurbo::Point::new(wx, wy);
+        if st.eraser_kind == EraserKind::Area {
+            // Thin the path: a new point only matters once it has moved a
+            // fraction of the radius.
+            let far_enough = st
+                .erase_path
+                .last()
+                .map(|last| (*last - p).hypot() >= radius * 0.35)
+                .unwrap_or(true);
+            if far_enough {
+                st.erase_path.push(p);
+            }
+        }
+        let mut hits = Vec::new();
+        for s in &st.session.content.strokes {
+            if st.live_erased.contains(&s.id) {
+                continue;
+            }
+            if omascratch_ink::stroke_hit(&s.points, s.width, p, radius) {
+                hits.push(s.id);
+            }
+        }
+        for id in hits {
+            st.live_erased.insert(id);
+        }
+    }
+
     fn push_point_locked(st: &mut State, x: f64, y: f64, pressure: f64, tilt_x: f64, tilt_y: f64) {
         let (wx, wy) = Self::widget_to_world(st, x, y);
+        let wp = kurbo::Point::new(wx, wy);
+        st.pointer = (x, y);
+        st.debug.sample_times.push_back(Instant::now());
+        if let Some((sx, sy, start_offset)) = st.panning {
+            st.offset = start_offset - kurbo::Vec2::new(x - sx, y - sy) / st.zoom;
+            Self::clamp_offset(st);
+            return;
+        }
+        if st.erasing {
+            Self::erase_at(st, wx, wy);
+            return;
+        }
+        if st.lassoing {
+            let far = st.lasso_path.last().map(|l| (*l - wp).hypot() >= 2.0 / st.zoom).unwrap_or(true);
+            if far {
+                st.lasso_path.push(wp);
+            }
+            return;
+        }
+        if let Some(last) = st.sel_drag {
+            st.sel_offset += wp - last;
+            st.sel_drag = Some(wp);
+            return;
+        }
+        if let Some((start, cur)) = st.shape_drag.as_mut() {
+            *cur = if st.shift_down { constrain_shape(st.shape_kind, *start, wp) } else { wp };
+            return;
+        }
         // A zero pressure sample on a device that reports pressure is a
         // proximity artifact; clamp into a drawable range instead of a gap.
         let p = if pressure <= 0.0 { 0.05 } else { pressure.min(1.0) };
@@ -425,7 +1100,6 @@ impl CanvasView {
         st.debug.min_pressure = st.debug.min_pressure.min(pressure);
         st.debug.max_pressure = st.debug.max_pressure.max(pressure);
         st.debug.last_tilt = (tilt_x, tilt_y);
-        st.debug.sample_times.push_back(Instant::now());
         if let Some(live) = st.live.as_mut() {
             let dt = live.started.elapsed().as_millis().min(u16::MAX as u128) as u16;
             live.points.push(InkPoint {
@@ -442,17 +1116,8 @@ impl CanvasView {
     fn mouse_begin(&self, x: f64, y: f64) {
         self.grab_focus();
         let mut st = self.imp().state.borrow_mut();
-        let tool = st.tool;
-        let width = st.stroke_width;
         st.debug.tool_name = "Mouse".into();
-        st.live = Some(LiveStroke {
-            tool,
-            width,
-            points: Vec::with_capacity(128),
-            started: Instant::now(),
-            t0_ms: now_unix_ms(),
-            simulate_pressure: true,
-        });
+        Self::begin_locked(&mut st, x, y, true);
         Self::push_point_locked(&mut st, x, y, 0.5, 0.0, 0.0);
         drop(st);
         self.queue_draw();
@@ -467,12 +1132,140 @@ impl CanvasView {
 
     fn commit_live(&self) {
         let mut st = self.imp().state.borrow_mut();
+
+        if st.panning.take().is_some() {
+            drop(st);
+            self.queue_draw();
+            return;
+        }
+
+        // Lasso finished: everything fully inside the loop becomes selected.
+        if st.lassoing {
+            st.lassoing = false;
+            let poly = std::mem::take(&mut st.lasso_path);
+            st.selection = st
+                .session
+                .content
+                .strokes
+                .iter()
+                .filter(|s| omascratch_ink::stroke_inside_polygon(&s.points, &poly))
+                .map(|s| s.id)
+                .collect();
+            drop(st);
+            self.queue_draw();
+            return;
+        }
+
+        // Selection move finished: commit the accumulated offset.
+        if st.sel_drag.take().is_some() {
+            let offset = std::mem::replace(&mut st.sel_offset, kurbo::Vec2::ZERO);
+            if offset.hypot() >= 0.01 && !st.selection.is_empty() {
+                let ids: Vec<StrokeId> = st.selection.iter().copied().collect();
+                for id in &ids {
+                    st.node_cache.remove(id);
+                }
+                st.session.dispatch(Command::TranslateStrokes { ids, dx: offset.x, dy: offset.y });
+                drop(st);
+                self.queue_draw();
+                self.notify_changed();
+                return;
+            }
+            drop(st);
+            self.queue_draw();
+            return;
+        }
+
+        // Shape finished: commit as ink strokes (one undo step).
+        if let Some((start, end)) = st.shape_drag.take() {
+            if (end - start).hypot() >= 3.0 {
+                let polylines = omascratch_ink::shape_polylines(st.shape_kind, start, end);
+                let t0 = now_unix_ms();
+                let strokes: Vec<Stroke> = polylines
+                    .into_iter()
+                    .filter(|l| l.len() >= 2)
+                    .map(|l| Stroke {
+                        id: StrokeId::new(),
+                        tool: Tool::Shape,
+                        color: st.cur_color,
+                        width: st.cur_width,
+                        t0_ms: t0,
+                        points: l
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, (x, y))| InkPoint {
+                                x,
+                                y,
+                                pressure: 0.6,
+                                tilt_x: 0.0,
+                                tilt_y: 0.0,
+                                dt_ms: (i as u16).saturating_mul(4),
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                if !strokes.is_empty() {
+                    st.session.dispatch(Command::AddStrokes(strokes));
+                    drop(st);
+                    self.queue_draw();
+                    self.notify_changed();
+                    return;
+                }
+            }
+            drop(st);
+            self.queue_draw();
+            return;
+        }
+
+        // Eraser drag: commit everything the drag touched as one undoable
+        // EraseStrokes command (area eraser adds split fragments back).
+        if st.erasing {
+            st.erasing = false;
+            let ids: Vec<StrokeId> = st.live_erased.drain().collect();
+            let removed: Vec<Stroke> = ids
+                .iter()
+                .filter_map(|id| {
+                    st.session.content.stroke_index(*id).map(|i| st.session.content.strokes[i].clone())
+                })
+                .collect();
+            let mut replacements: Vec<Stroke> = Vec::new();
+            if st.eraser_kind == EraserKind::Area && !st.erase_path.is_empty() {
+                for orig in &removed {
+                    let fragments = omascratch_ink::erase_samples(
+                        &orig.points,
+                        &st.erase_path,
+                        st.eraser_radius + orig.width / 2.0,
+                    );
+                    for pts in fragments {
+                        replacements.push(Stroke {
+                            id: StrokeId::new(),
+                            tool: orig.tool,
+                            color: orig.color,
+                            width: orig.width,
+                            t0_ms: orig.t0_ms,
+                            points: pts,
+                        });
+                    }
+                }
+            }
+            st.erase_path.clear();
+            if !removed.is_empty() {
+                for id in &ids {
+                    st.node_cache.remove(id);
+                }
+                st.session.dispatch(Command::EraseStrokes { removed, replacements });
+                drop(st);
+                self.queue_draw();
+                self.notify_changed();
+            }
+            return;
+        }
+
         let Some(live) = st.live.take() else { return };
         if live.points.len() >= 2 {
             let stroke = Stroke {
                 id: StrokeId::new(),
                 tool: live.tool,
-                color: SemanticColor::Foreground,
+                color: live.color,
                 width: live.width,
                 t0_ms: live.t0_ms,
                 points: live.points,
@@ -498,8 +1291,9 @@ impl CanvasView {
 
         let mut st = self.imp().state.borrow_mut();
 
-        // Background (M5 replaces this with the themed page + rule lines).
-        snapshot.append_color(&BG, &graphene::Rect::new(0.0, 0.0, width, height));
+        // Page background (M5 swaps these constants for the Omarchy theme).
+        let bg = if st.inverted { st.palette.bg_inv } else { st.palette.bg };
+        snapshot.append_color(&bg, &graphene::Rect::new(0.0, 0.0, width, height));
 
         // World transform: screen = (world - offset) * zoom.
         snapshot.save();
@@ -513,6 +1307,42 @@ impl CanvasView {
             st.offset.y + height as f64 / st.zoom,
         );
 
+        // Rule / grid lines + margin, drawn across the visible world rect.
+        if st.background.kind != BackgroundKind::None || st.background.margin {
+            let rule = if st.inverted { st.palette.rule_inv } else { st.palette.rule };
+            let lw = (1.0 / st.zoom) as f32;
+            let pb = gsk::PathBuilder::new();
+            let spacing = st.background.spacing.max(8.0);
+            if st.background.kind != BackgroundKind::None {
+                let first = (visible.y0 / spacing).floor() as i64;
+                let last = (visible.y1 / spacing).ceil() as i64;
+                for k in first..=last {
+                    let y = k as f64 * spacing;
+                    pb.move_to(visible.x0 as f32, y as f32);
+                    pb.line_to(visible.x1 as f32, y as f32);
+                }
+            }
+            if st.background.kind == BackgroundKind::Grid {
+                let first = (visible.x0 / spacing).floor() as i64;
+                let last = (visible.x1 / spacing).ceil() as i64;
+                for k in first..=last {
+                    let x = k as f64 * spacing;
+                    pb.move_to(x as f32, visible.y0 as f32);
+                    pb.line_to(x as f32, visible.y1 as f32);
+                }
+            }
+            snapshot.append_stroke(&pb.to_path(), &gsk::Stroke::new(lw), &rule);
+            if st.background.margin {
+                // Indented like paper: the margin line sits in from the left.
+                const MARGIN_X: f32 = 90.0;
+                let margin = if st.inverted { st.palette.margin_inv } else { st.palette.margin };
+                let mb = gsk::PathBuilder::new();
+                mb.move_to(MARGIN_X, visible.y0 as f32);
+                mb.line_to(MARGIN_X, visible.y1 as f32);
+                snapshot.append_stroke(&mb.to_path(), &gsk::Stroke::new(lw * 1.5), &margin);
+            }
+        }
+
         // Committed strokes: cached node per stroke, culled by bounds.
         let live_simulate = st.live.as_ref().map(|l| l.simulate_pressure);
         let strokes: Vec<(StrokeId, Option<kurbo::Rect>)> =
@@ -524,22 +1354,123 @@ impl CanvasView {
             if bounds.intersect(visible).is_zero_area() {
                 continue;
             }
+            // Strokes the current eraser drag affects: stroke eraser hides
+            // them; area eraser previews the surviving fragments live.
+            if st.live_erased.contains(&id) {
+                if st.eraser_kind == EraserKind::Area && st.erasing && !st.erase_path.is_empty() {
+                    if let Some(i) = st.session.content.stroke_index(id) {
+                        let s = &st.session.content.strokes[i];
+                        let frags = omascratch_ink::erase_samples(
+                            &s.points,
+                            &st.erase_path,
+                            st.eraser_radius + s.width / 2.0,
+                        );
+                        let color = resolve_color_inv(s.color, s.tool, st.inverted, &st.palette);
+                        let (tool, width) = (s.tool, s.width);
+                        for pts in frags {
+                            if tool == Tool::Shape {
+                                snapshot.append_stroke(&polyline_to_gsk(&pts), &shape_stroke(width), &color);
+                            } else {
+                                let path = omascratch_ink::stroke_bezpath(&pts, tool, width, false);
+                                snapshot.append_fill(&bezpath_to_gsk(&path), gsk::FillRule::Winding, &color);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             if !st.node_cache.contains_key(&id) {
                 let stroke = st.session.content.strokes[st.session.content.stroke_index(id).unwrap()].clone();
-                let path = omascratch_ink::stroke_bezpath(
-                    &stroke.points,
-                    stroke.tool,
-                    stroke.width,
-                    false,
-                );
+                let color = resolve_color_inv(stroke.color, stroke.tool, st.inverted, &st.palette);
                 let sub = gtk::Snapshot::new();
-                sub.append_fill(&bezpath_to_gsk(&path), gsk::FillRule::Winding, &INK);
+                if stroke.tool == Tool::Shape {
+                    // Shapes: clean constant-width stroked path.
+                    sub.append_stroke(
+                        &polyline_to_gsk(&stroke.points),
+                        &shape_stroke(stroke.width),
+                        &color,
+                    );
+                } else {
+                    let path = omascratch_ink::stroke_bezpath(
+                        &stroke.points,
+                        stroke.tool,
+                        stroke.width,
+                        false,
+                    );
+                    sub.append_fill(&bezpath_to_gsk(&path), gsk::FillRule::Winding, &color);
+                }
                 if let Some(node) = sub.to_node() {
                     st.node_cache.insert(id, node);
                 }
             }
+            // A selection being dragged renders translated, after this loop.
+            if st.sel_drag.is_some() && st.selection.contains(&id) {
+                continue;
+            }
             if let Some(node) = st.node_cache.get(&id) {
                 snapshot.append_node(node);
+            }
+        }
+
+        // Dragged selection: draw its strokes shifted by the live offset.
+        if st.sel_drag.is_some() && !st.selection.is_empty() {
+            snapshot.save();
+            snapshot.translate(&graphene::Point::new(st.sel_offset.x as f32, st.sel_offset.y as f32));
+            let ids: Vec<StrokeId> = st.selection.iter().copied().collect();
+            for id in ids {
+                if let Some(node) = st.node_cache.get(&id) {
+                    snapshot.append_node(node);
+                }
+            }
+            snapshot.restore();
+        }
+
+        // Selection bounding box (dashed, constant on-screen width).
+        if !st.selection.is_empty() && !st.lassoing {
+            if let Some(mut b) = Self::selection_bounds(&st) {
+                if st.sel_drag.is_some() {
+                    b = b + st.sel_offset;
+                }
+                let pb = gsk::PathBuilder::new();
+                pb.add_rect(&graphene::Rect::new(
+                    b.x0 as f32,
+                    b.y0 as f32,
+                    b.width() as f32,
+                    b.height() as f32,
+                ));
+                let stroke = gsk::Stroke::new((1.5 / st.zoom) as f32);
+                stroke.set_dash(&[(6.0 / st.zoom) as f32, (4.0 / st.zoom) as f32]);
+                snapshot.append_stroke(&pb.to_path(), &stroke, &st.palette.accent);
+            }
+        }
+
+        // Lasso path preview.
+        if st.lassoing && st.lasso_path.len() >= 2 {
+            let pb = gsk::PathBuilder::new();
+            pb.move_to(st.lasso_path[0].x as f32, st.lasso_path[0].y as f32);
+            for p in &st.lasso_path[1..] {
+                pb.line_to(p.x as f32, p.y as f32);
+            }
+            let stroke = gsk::Stroke::new((1.5 / st.zoom) as f32);
+            stroke.set_dash(&[(5.0 / st.zoom) as f32, (4.0 / st.zoom) as f32]);
+            snapshot.append_stroke(&pb.to_path(), &stroke, &st.palette.accent);
+        }
+
+        // Shape preview while dragging.
+        if let Some((start, end)) = st.shape_drag {
+            if (end - start).hypot() >= 1.0 {
+                let color = resolve_color_inv(st.cur_color, Tool::Shape, st.inverted, &st.palette);
+                for line in omascratch_ink::shape_polylines(st.shape_kind, start, end) {
+                    if line.len() < 2 {
+                        continue;
+                    }
+                    let pb = gsk::PathBuilder::new();
+                    pb.move_to(line[0].0 as f32, line[0].1 as f32);
+                    for (x, y) in &line[1..] {
+                        pb.line_to(*x as f32, *y as f32);
+                    }
+                    snapshot.append_stroke(&pb.to_path(), &shape_stroke(st.cur_width), &color);
+                }
             }
         }
 
@@ -554,8 +1485,24 @@ impl CanvasView {
             );
             let path = omascratch_ink::outline_to_bezpath(&outline);
             if !path.is_empty() {
-                snapshot.append_fill(&bezpath_to_gsk(&path), gsk::FillRule::Winding, &INK);
+                let color = resolve_color_inv(live.color, live.tool, st.inverted, &st.palette);
+                snapshot.append_fill(&bezpath_to_gsk(&path), gsk::FillRule::Winding, &color);
             }
+        }
+
+        // Eraser cursor ring, drawn in world space (we are inside the world
+        // transform). Width is divided by zoom so it stays ~1.5px on screen.
+        if st.active == ActiveTool::Eraser {
+            let (px, py) = st.pointer;
+            let wx = st.offset.x + px / st.zoom;
+            let wy = st.offset.y + py / st.zoom;
+            let ring = gsk::PathBuilder::new();
+            ring.add_circle(&graphene::Point::new(wx as f32, wy as f32), st.eraser_radius as f32);
+            snapshot.append_stroke(
+                &ring.to_path(),
+                &gsk::Stroke::new((1.5 / st.zoom) as f32),
+                &gdk::RGBA::new(0.7, 0.7, 0.8, 0.8),
+            );
         }
 
         snapshot.restore();
@@ -567,11 +1514,12 @@ impl CanvasView {
                 st.debug.sample_times.pop_front();
             }
             let text = format!(
-                "tool: {}  |  pressure {:.3} (min {:.3} max {:.3})\n\
+                "tool: {} [{}]  |  pressure {:.3} (min {:.3} max {:.3})\n\
                  tilt: ({:+.2}, {:+.2})  |  {} samples/s\n\
                  strokes: {}  |  zoom {:.0}%  |  offset ({:.0}, {:.0})\n\
                  undo: {}  redo: {}",
                 if st.debug.tool_name.is_empty() { "-" } else { &st.debug.tool_name },
+                if st.debug.buttons.is_empty() { "-" } else { &st.debug.buttons },
                 st.debug.last_pressure,
                 st.debug.min_pressure,
                 st.debug.max_pressure,

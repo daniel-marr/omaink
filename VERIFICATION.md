@@ -48,6 +48,21 @@ Obsidian-style sidebar on the live session; verified interactively by the user:
 - A use-after-free crash (rebuilding the list inside a row widget's own signal) was found and fixed by deferring rebuilds to an idle tick; confirmed stable afterward.
 - `cargo test --workspace` — exit 0 (32 passed: core incl. 5 fractional-order tests, ink, store incl. library CRUD + view-state + conflicted-copy + interrupted-write).
 
+### M4 draw toolset + M5 Omarchy theming — live Hyprland acceptance (2026-10-01/02, user-driven iteration)
+
+All verified interactively by the user on the live session through many build-test rounds:
+
+- OneNote fluid toolbar: pen-preset chips (drawn glyphs with live color tips), click-again flyout (stroke preview, −/dots/+ thickness, Recent Colors, arranged color grid, More Colors dialog, Remove Pen), Add Pen menu, eraser chip with Stroke/Small/Medium/Large flyout; pen set, eraser config, recent colors and shape style persist (`~/.local/state/omascratch/toolbar.json`).
+- Area erasers split strokes into fragments (live preview, exact undo); highlighters have flat chisel ends (no start blob).
+- Select (click/drag), Lasso (enclose/move/delete), Hand pan tool; selection copy/cut/paste (Ctrl+C/X/V + toolbar buttons), paste offset + preselected.
+- Shapes: line/arrow/rect/ellipse as a dedicated `shape` stroke type (constant-width paths; preview == committed), Shift constrains (square/circle/45°), own thickness+color flyout.
+- Page backgrounds per note (rules/grid spacing presets + indented margin line at x=90), stored in the note file; canvas invert with neutral-ink luminance adaptation (black↔white track page polarity; colored inks unchanged).
+- M5 theming: `~/.local/state/omarchy/current/theme/colors.toml` → chrome CSS + libadwaita variable layer (dialogs/popovers/accent/destructive) + canvas palette + pen-chip tips; parent-dir watcher with debounce + persisted last-good; backdrop contrast pinned (no unfocused fading). Theme crate parses all required/derived keys (unit fixtures incl. partial + garbage files).
+- Viewport pinned to a top-left page origin (pan/zoom clamped); zoom indicator with click-to-100%; note switch resets to 100% + home.
+- Notebook/folder/note management unified: ⋯ menus, AlertDialog rename/new (popover prompts were killed by menu grab teardown — converted to dialogs), confirm-then-trash deletes; notebook rename relocates the open note's save path; notebook delete recovers to another note without writing into trash. Sub-folders disabled by product choice (UI only).
+- Stylus barrel button: click toggles eraser (and back to previous tool); stylus never triggers middle-drag pan. Pending user confirmation of button delivery on the XP-Pen (debug overlay shows b1/b2/b3 masks).
+- Desktop: Omarchy's default-opacity window rule (0.96 inactive) identified as the unfocused "dulling"; opt-out rule with `override` added to the USER's `~/.config/hypr/hyprland.lua` (not part of this repo; documented here), validated via `hyprctl reload` + `configerrors`.
+
 ## Historical
 
 None.

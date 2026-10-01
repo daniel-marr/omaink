@@ -48,6 +48,7 @@ impl Storage {
             order_key: "a0".into(),
             created_ms: now_ms(),
             modified_ms: now_ms(),
+            background: Default::default(),
             content: omascratch_core::NoteContent::default(),
             opaque_elements: vec![],
         });
@@ -71,8 +72,38 @@ impl Storage {
 
     pub fn load_into_canvas(&self, canvas: &CanvasView) {
         canvas.set_content(self.doc.borrow().content.clone());
+        canvas.set_background(self.doc.borrow().background);
         // A freshly loaded note starts at session revision 0.
         self.last_saved.set(0);
+    }
+
+    /// Update the open note's page background and write it synchronously.
+    pub fn set_background(self: &Rc<Self>, bg: omascratch_core::PageBackground, canvas: &CanvasView) {
+        self.doc.borrow_mut().background = bg;
+        let (revision, content) = canvas.content_snapshot();
+        let mut doc = self.doc.borrow().clone();
+        doc.content = content;
+        if let Err(e) = store::write_note(&self.path.borrow(), &doc, now_ms()) {
+            tracing::error!("background save failed: {e}");
+            return;
+        }
+        if revision > self.last_saved.get() {
+            self.last_saved.set(revision);
+        }
+    }
+
+    /// The open note's file moved (notebook renamed): keep content, follow path.
+    pub fn relocate(&self, new_path: PathBuf) {
+        *self.path.borrow_mut() = new_path;
+    }
+
+    /// Open a note WITHOUT saving the current one (its notebook was trashed).
+    pub fn abandon_and_open(self: &Rc<Self>, path: &Path, canvas: &CanvasView) {
+        if let Ok(doc) = store::read_note(path) {
+            *self.doc.borrow_mut() = doc;
+            *self.path.borrow_mut() = path.to_path_buf();
+            self.load_into_canvas(canvas);
+        }
     }
 
     /// Switch the open note: save the current one synchronously, then load the

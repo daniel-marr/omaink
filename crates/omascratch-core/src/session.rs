@@ -8,10 +8,18 @@ use crate::stroke::{Stroke, StrokeId};
 #[derive(Debug, Clone)]
 pub enum Command {
     AddStroke(Stroke),
+    /// Several strokes as one undo step (e.g. a drawn shape with arrowheads).
+    AddStrokes(Vec<Stroke>),
     /// Area/stroke eraser: removes strokes, optionally adding split fragments.
     EraseStrokes {
         removed: Vec<Stroke>,
         replacements: Vec<Stroke>,
+    },
+    /// Move a selection by (dx, dy) in world units.
+    TranslateStrokes {
+        ids: Vec<StrokeId>,
+        dx: f64,
+        dy: f64,
     },
 }
 
@@ -68,11 +76,13 @@ impl NoteSession {
     fn apply(&mut self, cmd: &Command) {
         match cmd {
             Command::AddStroke(s) => self.content.strokes.push(s.clone()),
+            Command::AddStrokes(strokes) => self.content.strokes.extend(strokes.iter().cloned()),
             Command::EraseStrokes { removed, replacements } => {
                 let ids: Vec<StrokeId> = removed.iter().map(|s| s.id).collect();
                 self.content.strokes.retain(|s| !ids.contains(&s.id));
                 self.content.strokes.extend(replacements.iter().cloned());
             }
+            Command::TranslateStrokes { ids, dx, dy } => self.translate(ids, *dx, *dy),
         }
     }
 
@@ -83,10 +93,26 @@ impl NoteSession {
                     self.content.strokes.remove(i);
                 }
             }
+            Command::AddStrokes(strokes) => {
+                let ids: Vec<StrokeId> = strokes.iter().map(|s| s.id).collect();
+                self.content.strokes.retain(|s| !ids.contains(&s.id));
+            }
             Command::EraseStrokes { removed, replacements } => {
                 let ids: Vec<StrokeId> = replacements.iter().map(|s| s.id).collect();
                 self.content.strokes.retain(|s| !ids.contains(&s.id));
                 self.content.strokes.extend(removed.iter().cloned());
+            }
+            Command::TranslateStrokes { ids, dx, dy } => self.translate(ids, -*dx, -*dy),
+        }
+    }
+
+    fn translate(&mut self, ids: &[StrokeId], dx: f64, dy: f64) {
+        for s in &mut self.content.strokes {
+            if ids.contains(&s.id) {
+                for p in &mut s.points {
+                    p.x += dx;
+                    p.y += dy;
+                }
             }
         }
     }
@@ -144,6 +170,29 @@ mod tests {
         s.undo();
         assert_eq!(s.content.strokes.len(), 1);
         assert_eq!(s.content.strokes[0].id, a_id);
+    }
+
+    #[test]
+    fn translate_moves_and_undo_restores_exactly() {
+        let mut s = NoteSession::default();
+        let a = stroke();
+        let id = a.id;
+        let orig = a.points.clone();
+        s.dispatch(Command::AddStroke(a));
+        s.dispatch(Command::TranslateStrokes { ids: vec![id], dx: 10.0, dy: -4.0 });
+        assert_eq!(s.content.strokes[0].points[0].x, orig[0].x + 10.0);
+        assert_eq!(s.content.strokes[0].points[0].y, orig[0].y - 4.0);
+        s.undo();
+        assert_eq!(s.content.strokes[0].points, orig);
+    }
+
+    #[test]
+    fn add_strokes_is_one_undo_step() {
+        let mut s = NoteSession::default();
+        s.dispatch(Command::AddStrokes(vec![stroke(), stroke()]));
+        assert_eq!(s.content.strokes.len(), 2);
+        s.undo();
+        assert_eq!(s.content.strokes.len(), 0);
     }
 
     #[test]

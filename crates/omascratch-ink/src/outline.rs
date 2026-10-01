@@ -28,10 +28,20 @@ fn options_for(tool: Tool, width: f64, simulate_pressure: bool, last: bool) -> S
             o.streamline = Some(0.35);
         }
         Tool::Highlighter => {
-            // Constant width: pressure must not thin a highlighter.
+            // Constant width: pressure must not thin a highlighter, and the
+            // ends are flat chisel cuts, not round blobs.
             o.thinning = Some(0.0);
             o.smoothing = Some(0.6);
             o.streamline = Some(0.5);
+            o.start = Some(TaperOptions { cap: Some(false), ..Default::default() });
+            o.end = Some(TaperOptions { cap: Some(false), ..Default::default() });
+        }
+        Tool::Shape => {
+            // Shapes normally bypass the freehand outline entirely (they are
+            // stroked as paths); keep sane constants for any caller that asks.
+            o.thinning = Some(0.0);
+            o.smoothing = Some(0.0);
+            o.streamline = Some(0.0);
         }
     }
     o

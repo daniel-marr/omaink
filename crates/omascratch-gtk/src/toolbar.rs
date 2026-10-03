@@ -864,9 +864,8 @@ impl Toolbar {
                 }
             })
         };
-        let editing = canvas.is_editing_text();
+        let has_target = canvas.has_text_target_for_lists();
         for (b, f) in &toggles {
-            b.set_sensitive(editing);
             let c = canvas.clone();
             let f = *f;
             let r = refresh.clone();
@@ -894,12 +893,13 @@ impl Toolbar {
             })
         };
         for (label, tip, k) in [
-            ("•  List", "Bulleted list", ListKind::Bullet),
-            ("1. List", "Numbered list", ListKind::Number),
-            ("☐  List", "Checklist (Ctrl+1)", ListKind::Check),
+            ("•", "Bulleted list", ListKind::Bullet),
+            ("1.", "Numbered list", ListKind::Number),
+            ("☐", "Checklist (Ctrl+1)", ListKind::Check),
         ] {
             let b = fmt_button(label, tip);
-            b.set_sensitive(editing);
+            b.set_sensitive(has_target);
+            b.add_css_class("list-kind-btn");
             list_btns.borrow_mut().push((b.clone(), k));
             let c = canvas.clone();
             let r = refresh_lists.clone();

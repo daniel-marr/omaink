@@ -278,6 +278,9 @@ window {{
     min-width: 0;
     padding: 2px;
 }}
+.list-kind-btn {{
+    min-width: 40px;
+}}
 /* The chosen option in a flyout (color, list type, style). Specific
    enough to beat Adwaita's `button.flat` reset. */
 popover button.option-selected,

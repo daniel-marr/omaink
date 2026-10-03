@@ -191,8 +191,9 @@ pub struct State {
     editing: Option<EditSession>,
     /// Font size for new text boxes (follows the last size used).
     text_font_size: f64,
-    /// Color for new text (None = theme ink).
-    text_color: Option<SemanticColor>,
+    /// Style + color for new text (set from the text flyout with nothing
+    /// selected or edited).
+    text_defaults: textmod::StyleState,
     /// Shell hook: text editing state for the toolbar format group
     /// (None = not editing).
     on_text_state: Option<Box<dyn Fn(Option<textmod::StyleState>)>>,
@@ -267,7 +268,7 @@ impl Default for State {
             clipboard_texts: Vec::new(),
             editing: None,
             text_font_size: textmod::DEFAULT_FONT_SIZE,
-            text_color: None,
+            text_defaults: textmod::StyleState::default(),
             on_text_state: None,
             sel_resize: None,
             marquee: None,
@@ -741,8 +742,8 @@ impl CanvasView {
         let is_new = self.imp().state.borrow().editing.as_ref().is_some_and(|e| e.original.is_none());
         ed.load(&working);
         if is_new {
-            let color = self.imp().state.borrow().text_color;
-            ed.set_pending(textmod::StyleState { color, ..Default::default() });
+            let defaults = self.imp().state.borrow().text_defaults;
+            ed.set_pending(defaults);
         }
         self.sync_editor_geometry(true);
         ed.view.set_visible(true);
@@ -968,74 +969,227 @@ impl CanvasView {
         false
     }
 
-    // -- format group API (toolbar) --
+    // -- text settings API (toolbar flyout) --
+    //
+    // Three targets, in priority order: the open editor (selection / next
+    // typed text), selected text boxes (whole boxes, one undo step), or —
+    // with neither — the defaults for new text.
 
-    pub fn text_format(&self, f: textmod::Fmt) {
-        if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
-            ed.toggle(f);
-            ed.view.grab_focus();
+    fn selected_texts(&self) -> Vec<TextBox> {
+        let st = self.imp().state.borrow();
+        st.session.content.texts.iter().filter(|t| st.sel_texts.contains(&t.id)).cloned().collect()
+    }
+
+    /// True when list/size changes have something to act on.
+    pub fn has_text_target_for_lists(&self) -> bool {
+        self.text_has_target()
+    }
+
+    pub fn text_has_target(&self) -> bool {
+        self.is_editing_text() || !self.imp().state.borrow().sel_texts.is_empty()
+    }
+
+    /// Transform every selected box (one exact undo step).
+    fn update_selected_texts(&self, f: impl Fn(&mut TextBox)) -> bool {
+        let before = self.selected_texts();
+        if before.is_empty() {
+            return false;
+        }
+        let ctx = self.pango_context();
+        let after: Vec<TextBox> = {
+            let st = self.imp().state.borrow();
+            let resolver = Self::text_resolver(&st);
+            before
+                .iter()
+                .map(|t| {
+                    let mut a = t.clone();
+                    f(&mut a);
+                    a.h = textmod::layout_text(&ctx, &a, Self::text_cell(&st, a.font_size), &resolver).height;
+                    a
+                })
+                .collect()
+        };
+        if after == before {
+            return true;
+        }
+        self.imp().state.borrow_mut().session.dispatch(Command::ReplaceTexts { before, after });
+        self.queue_draw();
+        self.notify_changed();
+        true
+    }
+
+    /// Aggregate style of whole boxes: a flag is on when every character has it.
+    fn boxes_style(boxes: &[TextBox]) -> textmod::StyleState {
+        let spans: Vec<&omascratch_core::Span> = boxes
+            .iter()
+            .flat_map(|t| t.paras.iter().flat_map(|p| p.spans.iter()))
+            .filter(|s| !s.text.is_empty())
+            .collect();
+        let Some(first) = spans.first() else { return textmod::StyleState::default() };
+        textmod::StyleState {
+            bold: spans.iter().all(|s| s.bold),
+            italic: spans.iter().all(|s| s.italic),
+            underline: spans.iter().all(|s| s.underline),
+            highlight: spans.iter().all(|s| s.highlight),
+            color: if spans.iter().all(|s| s.color == first.color) { first.color } else { None },
         }
     }
 
-    /// Style at the cursor while editing; defaults otherwise.
+    /// Current style for the flyout's indicators.
     pub fn text_style_state(&self) -> textmod::StyleState {
         if self.is_editing_text() {
             if let Some(ed) = self.editor() {
                 return ed.current_style();
             }
         }
-        textmod::StyleState { color: self.imp().state.borrow().text_color, ..Default::default() }
+        let sel = self.selected_texts();
+        if !sel.is_empty() {
+            return Self::boxes_style(&sel);
+        }
+        self.imp().state.borrow().text_defaults
     }
 
-    /// List kind of the line the cursor is on (None = plain paragraph).
-    pub fn text_list_kind(&self) -> Option<textmod::ListKind> {
-        let ed = self.editor().filter(|_| self.is_editing_text())?;
-        ed.current_list_kind()
+    pub fn text_format(&self, f: textmod::Fmt) {
+        use textmod::Fmt;
+        if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
+            ed.toggle(f);
+            ed.view.grab_focus();
+            self.schedule_checkpoint();
+            return;
+        }
+        let sel = self.selected_texts();
+        if !sel.is_empty() {
+            let cur = Self::boxes_style(&sel);
+            let on = !match f {
+                Fmt::Bold => cur.bold,
+                Fmt::Italic => cur.italic,
+                Fmt::Underline => cur.underline,
+                Fmt::Highlight => cur.highlight,
+            };
+            self.update_selected_texts(|t| {
+                for sp in t.paras.iter_mut().flat_map(|p| p.spans.iter_mut()) {
+                    match f {
+                        Fmt::Bold => sp.bold = on,
+                        Fmt::Italic => sp.italic = on,
+                        Fmt::Underline => sp.underline = on,
+                        Fmt::Highlight => sp.highlight = on,
+                    }
+                }
+            });
+            return;
+        }
+        let mut st = self.imp().state.borrow_mut();
+        let d = &mut st.text_defaults;
+        match f {
+            Fmt::Bold => d.bold = !d.bold,
+            Fmt::Italic => d.italic = !d.italic,
+            Fmt::Underline => d.underline = !d.underline,
+            Fmt::Highlight => d.highlight = !d.highlight,
+        }
     }
 
-    /// Color the selection / next typed text; also the default for new text.
+    /// Color the editor selection / next text, or whole selected boxes; it
+    /// also becomes the color for new text.
     pub fn text_set_color(&self, color: Option<SemanticColor>) {
-        self.imp().state.borrow_mut().text_color = color;
+        self.imp().state.borrow_mut().text_defaults.color = color;
         if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
             ed.set_color(color);
             ed.view.grab_focus();
             self.schedule_checkpoint();
+            return;
         }
+        self.update_selected_texts(|t| {
+            for sp in t.paras.iter_mut().flat_map(|p| p.spans.iter_mut()) {
+                sp.color = color;
+            }
+        });
+    }
+
+    fn para_list_kind(k: ParaKind) -> Option<textmod::ListKind> {
+        match k {
+            ParaKind::Bullet => Some(textmod::ListKind::Bullet),
+            ParaKind::Number => Some(textmod::ListKind::Number),
+            ParaKind::Check { .. } => Some(textmod::ListKind::Check),
+            ParaKind::Body => None,
+        }
+    }
+
+    /// List kind at the cursor, or shared by every paragraph of the selected boxes.
+    pub fn text_list_kind(&self) -> Option<textmod::ListKind> {
+        if self.is_editing_text() {
+            return self.editor()?.current_list_kind();
+        }
+        let sel = self.selected_texts();
+        let mut kinds = sel.iter().flat_map(|t| t.paras.iter().map(|p| Self::para_list_kind(p.kind)));
+        let first = kinds.next()??;
+        kinds.all(|k| k == Some(first)).then_some(first)
     }
 
     pub fn text_list(&self, k: textmod::ListKind) {
         if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
             ed.toggle_list(k);
             ed.view.grab_focus();
+            self.schedule_checkpoint();
+            return;
+        }
+        let remove = self.text_list_kind() == Some(k);
+        self.update_selected_texts(|t| {
+            for p in &mut t.paras {
+                p.kind = if remove {
+                    ParaKind::Body
+                } else {
+                    match k {
+                        textmod::ListKind::Bullet => ParaKind::Bullet,
+                        textmod::ListKind::Number => ParaKind::Number,
+                        textmod::ListKind::Check => match p.kind {
+                            ParaKind::Check { checked } => ParaKind::Check { checked },
+                            _ => ParaKind::Check { checked: false },
+                        },
+                    }
+                };
+            }
+        });
+    }
+
+    fn step_size(cur: f64, up: bool) -> f64 {
+        const SIZES: [f64; 11] = [10.0, 12.0, 14.0, 16.0, 18.0, 22.0, 26.0, 32.0, 40.0, 48.0, 64.0];
+        if up {
+            SIZES.iter().copied().find(|s| *s > cur + 0.01).unwrap_or(cur)
+        } else {
+            SIZES.iter().rev().copied().find(|s| *s < cur - 0.01).unwrap_or(cur)
         }
     }
 
-    /// Step the edited box's font size up/down through preset sizes.
+    /// Step the font size of the edited box, the selected boxes, or the
+    /// new-text default. Returns the resulting size.
     pub fn text_font_step(&self, up: bool) -> Option<f64> {
-        const SIZES: [f64; 11] = [10.0, 12.0, 14.0, 16.0, 18.0, 22.0, 26.0, 32.0, 40.0, 48.0, 64.0];
-        let size = {
-            let mut st = self.imp().state.borrow_mut();
-            let cur = st.editing.as_ref().map(|e| e.working.font_size).unwrap_or(st.text_font_size);
-            let next = if up {
-                SIZES.iter().copied().find(|s| *s > cur + 0.01).unwrap_or(cur)
-            } else {
-                SIZES.iter().rev().copied().find(|s| *s < cur - 0.01).unwrap_or(cur)
+        if self.is_editing_text() {
+            let size = {
+                let mut st = self.imp().state.borrow_mut();
+                let sess = st.editing.as_mut()?;
+                sess.working.font_size = Self::step_size(sess.working.font_size, up);
+                sess.working.font_size
             };
-            if let Some(sess) = st.editing.as_mut() {
-                sess.working.font_size = next;
+            self.imp().state.borrow_mut().text_font_size = size;
+            self.sync_editor_geometry(true);
+            if let Some(ed) = self.editor() {
+                ed.view.grab_focus();
             }
-            next
-        };
-        self.imp().state.borrow_mut().text_font_size = size;
-        self.sync_editor_geometry(true);
-        if let Some(ed) = self.editor() {
-            ed.view.grab_focus();
+            self.schedule_checkpoint();
+            return Some(size);
         }
-        self.schedule_checkpoint();
-        Some(size)
+        if self.update_selected_texts(|t| t.font_size = Self::step_size(t.font_size, up)) {
+            return Some(self.text_font_size());
+        }
+        let mut st = self.imp().state.borrow_mut();
+        st.text_font_size = Self::step_size(st.text_font_size, up);
+        Some(st.text_font_size)
     }
 
     pub fn text_font_size(&self) -> f64 {
+        if let Some(t) = self.selected_texts().first().filter(|_| !self.is_editing_text()) {
+            return t.font_size;
+        }
         let st = self.imp().state.borrow();
         st.editing.as_ref().map(|e| e.working.font_size).unwrap_or(st.text_font_size)
     }

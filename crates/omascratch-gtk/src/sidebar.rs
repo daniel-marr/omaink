@@ -692,7 +692,7 @@ impl Sidebar {
             ("Shift+click / Shift+drag", "Add to / remove from selection"),
             ("Drag a corner handle", "Resize selection"),
             ("Shift while drawing a shape", "Square / circle / 45°"),
-            ("Drop image files on the page", "Insert images (or toolbar image button)"),
+            ("Toolbar image button", "Insert images from files"),
             ("Right-click / hold an image", "Pin to background / delete"),
             ("Pen button", "Toggle eraser"),
             ("O", "Debug overlay"),

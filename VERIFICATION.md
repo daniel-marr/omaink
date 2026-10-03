@@ -76,6 +76,12 @@ Harness: `crates/omascratch-store/examples/gen_stress.rs` builds an isolated pro
 
 Correctness parity in the same runs: eraser sweep hits (10) and lasso selection (114) identical before/after. Also fixed: sync conflict copies were never listed in the sidebar (filenames don't parse as ids); rows are now keyed by path and conflict copies show with a "(sync conflict)" suffix.
 
+### Image file drag-and-drop — investigated and removed (2026-10-03)
+
+- Diagnostic window-level drop logging showed the user's file manager (Strata, native GTK4) reaches the window with formats `GdkFileList … text/uri-list … application/vnd.portal.filetransfer` but offers **only the MOVE action**. The canvas target deliberately refused MOVE (a completed move lets the source delete the original file), so drops were rejected.
+- Drags from Chrome (running under XWayland) never reached the window at all.
+- Decision (user): drag-and-drop removed for now; insert-from-file via the toolbar button remains. Revisit if a safe path exists (e.g. COPY-capable sources, or accepting MOVE only after confirming the source keeps the file).
+
 ## Historical
 
 None.

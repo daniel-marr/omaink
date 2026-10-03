@@ -259,6 +259,53 @@ fn eraser_glyph() -> gtk::DrawingArea {
     area
 }
 
+/// Insert-image icon: a framed picture (mountains + sun) with a plus badge,
+/// drawn at full toolbar size so it reads like the other tools.
+fn image_glyph() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(24);
+    area.set_content_height(22);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(|_, cr, w, h| {
+        let w = w as f64;
+        let h = h as f64;
+        let fg = (0.78, 0.82, 0.96);
+        // Frame.
+        cr.set_source_rgb(fg.0, fg.1, fg.2);
+        cr.set_line_width(1.6);
+        rounded_rect(cr, w * 0.06, h * 0.12, w * 0.74, h * 0.70, 2.5);
+        let _ = cr.stroke();
+        // Sun.
+        cr.arc(w * 0.27, h * 0.33, w * 0.07, 0.0, std::f64::consts::TAU);
+        let _ = cr.fill();
+        // Mountains.
+        cr.move_to(w * 0.10, h * 0.78);
+        cr.line_to(w * 0.32, h * 0.50);
+        cr.line_to(w * 0.46, h * 0.66);
+        cr.line_to(w * 0.58, h * 0.48);
+        cr.line_to(w * 0.76, h * 0.78);
+        cr.close_path();
+        let _ = cr.fill();
+        // Plus badge (bottom-right), punched out of the frame.
+        let (bx, by, br) = (w * 0.80, h * 0.76, w * 0.17);
+        cr.set_source_rgb(0.086, 0.086, 0.118);
+        cr.arc(bx, by, br + 1.2, 0.0, std::f64::consts::TAU);
+        let _ = cr.fill();
+        cr.set_source_rgb(fg.0, fg.1, fg.2);
+        cr.arc(bx, by, br, 0.0, std::f64::consts::TAU);
+        let _ = cr.fill();
+        cr.set_source_rgb(0.086, 0.086, 0.118);
+        cr.set_line_width(1.6);
+        cr.move_to(bx - br * 0.55, by);
+        cr.line_to(bx + br * 0.55, by);
+        cr.move_to(bx, by - br * 0.55);
+        cr.line_to(bx, by + br * 0.55);
+        let _ = cr.stroke();
+    });
+    area
+}
+
 /// Hand (pan) icon: a simple mitten-style hand.
 fn hand_glyph() -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
@@ -592,7 +639,8 @@ impl Toolbar {
         paste_btn.set_tooltip_text(Some("Paste (Ctrl+V)"));
         let c = canvas.clone();
         paste_btn.connect_clicked(move |_| c.paste());
-        let image_btn = gtk::Button::from_icon_name("insert-image-symbolic");
+        let image_btn = gtk::Button::new();
+        image_btn.set_child(Some(&image_glyph()));
         image_btn.add_css_class("flat");
         image_btn.set_tooltip_text(Some("Insert image from file…"));
         let c = canvas.clone();

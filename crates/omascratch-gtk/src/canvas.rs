@@ -870,9 +870,9 @@ impl CanvasView {
         self.place_image(tex, name, at_widget, false);
     }
 
-    /// Image files (file picker or drag-and-drop): original bytes and format
-    /// are kept, so photos stay JPEG-sized. Multiple files stagger from the
-    /// drop point (or view center) and end up selected together.
+    /// Image files (file picker): original bytes and format are kept, so
+    /// photos stay JPEG-sized. Multiple files stagger from the view center
+    /// and end up selected together.
     pub fn insert_image_files(&self, files: Vec<gio::File>, at_widget: Option<(f64, f64)>) {
         let view = self.clone();
         glib::spawn_future_local(async move {
@@ -1292,24 +1292,6 @@ impl CanvasView {
         });
         self.add_controller(long);
 
-        // Drag-and-drop: image files from the file manager, or images dragged
-        // from other apps (as textures), land at the drop point.
-        let file_drop = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::COPY);
-        file_drop.set_types(&[gdk::FileList::static_type(), gdk::Texture::static_type()]);
-        let weak = self.downgrade();
-        file_drop.connect_drop(move |_, value, x, y| {
-            let Some(view) = weak.upgrade() else { return false };
-            if let Ok(list) = value.get::<gdk::FileList>() {
-                view.insert_image_files(list.files(), Some((x, y)));
-                return true;
-            }
-            if let Ok(tex) = value.get::<gdk::Texture>() {
-                view.insert_texture_at(tex, Some((x, y)));
-                return true;
-            }
-            false
-        });
-        self.add_controller(file_drop);
 
         // Scroll = pan; Ctrl+scroll = zoom around the pointer.
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);

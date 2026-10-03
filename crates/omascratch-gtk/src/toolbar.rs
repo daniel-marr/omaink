@@ -860,7 +860,7 @@ impl Toolbar {
                         Fmt::Underline => st.underline,
                         Fmt::Highlight => st.highlight,
                     };
-                    set_active_css(b, on);
+                    set_selected_css(b, on);
                 }
             })
         };
@@ -882,6 +882,17 @@ impl Toolbar {
         // Lists.
         vbox.append(&section_label("Lists"));
         let lrow = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let list_btns: Rc<RefCell<Vec<(gtk::Button, ListKind)>>> = Rc::default();
+        let refresh_lists = {
+            let canvas = canvas.clone();
+            let list_btns = list_btns.clone();
+            Rc::new(move || {
+                let cur = canvas.text_list_kind();
+                for (b, k) in list_btns.borrow().iter() {
+                    set_selected_css(b, cur == Some(*k));
+                }
+            })
+        };
         for (label, tip, k) in [
             ("•  ⋯", "Bulleted list", ListKind::Bullet),
             ("1. ⋯", "Numbered list", ListKind::Number),
@@ -889,10 +900,16 @@ impl Toolbar {
         ] {
             let b = fmt_button(label, tip);
             b.set_sensitive(editing);
+            list_btns.borrow_mut().push((b.clone(), k));
             let c = canvas.clone();
-            b.connect_clicked(move |_| c.text_list(k));
+            let r = refresh_lists.clone();
+            b.connect_clicked(move |_| {
+                c.text_list(k);
+                r();
+            });
             lrow.append(&b);
         }
+        refresh_lists();
         vbox.append(&lrow);
 
         // Size.
@@ -919,6 +936,7 @@ impl Toolbar {
         // Colors (same grid as the pens). "Theme ink" clears the override.
         vbox.append(&section_label("Color"));
         let grid_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let swatches: Swatches = Rc::default();
         for row in color_rows() {
             let r = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             for (name, color) in row {
@@ -930,12 +948,18 @@ impl Toolbar {
                 b.set_tooltip_text(Some(name));
                 let c = canvas.clone();
                 let value = if color == SemanticColor::Foreground { None } else { Some(color) };
-                b.connect_clicked(move |_| c.text_set_color(value));
+                swatches.borrow_mut().push((b.clone(), value));
+                let sw = swatches.clone();
+                b.connect_clicked(move |_| {
+                    c.text_set_color(value);
+                    mark_selected(&sw, value);
+                });
                 r.append(&b);
             }
             grid_box.append(&r);
         }
         vbox.append(&grid_box);
+        mark_selected(&swatches, canvas.text_style_state().color);
 
         popover.set_child(Some(&vbox));
         popover.connect_closed(|p| {
@@ -1387,12 +1411,13 @@ impl Toolbar {
         }
 
         // Recent colors.
+        let swatches: Swatches = Rc::default();
         let recent = self.inner.recent.borrow().clone();
         if !recent.is_empty() {
             vbox.append(&section_label("Recent Colors"));
             let rrow = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             for color in recent.into_iter().take(6) {
-                rrow.append(&self.color_button(color, idx, &cfg, &preview, &trow));
+                rrow.append(&self.color_button(color, idx, &cfg, &preview, &trow, &swatches));
             }
             vbox.append(&rrow);
         }
@@ -1403,13 +1428,14 @@ impl Toolbar {
         for row in color_rows() {
             let r = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             for (name, color) in row {
-                let b = self.color_button(color, idx, &cfg, &preview, &trow);
+                let b = self.color_button(color, idx, &cfg, &preview, &trow, &swatches);
                 b.set_tooltip_text(Some(name));
                 r.append(&b);
             }
             grid_box.append(&r);
         }
         vbox.append(&grid_box);
+        mark_selected(&swatches, Some(cfg0.color));
 
         vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
@@ -1556,6 +1582,7 @@ impl Toolbar {
 
         vbox.append(&section_label("Colors"));
         let grid_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let swatches: Swatches = Rc::default();
         for row in color_rows() {
             let r = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             for (name, color) in row {
@@ -1564,20 +1591,24 @@ impl Toolbar {
                 b.add_css_class("swatch-btn");
                 b.set_child(Some(&color_swatch(rgba_of(&self.inner.canvas, color), 22)));
                 b.set_tooltip_text(Some(name));
+                swatches.borrow_mut().push((b.clone(), Some(color)));
                 let t = self.clone();
                 let areas2 = areas.clone();
+                let sw = swatches.clone();
                 b.connect_clicked(move |_| {
                     *t.inner.shape_color.borrow_mut() = color;
                     t.apply_shape_style();
                     for a in areas2.borrow().iter() {
                         a.queue_draw();
                     }
+                    mark_selected(&sw, Some(color));
                 });
                 r.append(&b);
             }
             grid_box.append(&r);
         }
         vbox.append(&grid_box);
+        mark_selected(&swatches, Some(*self.inner.shape_color.borrow()));
 
         popover.set_child(Some(&vbox));
         popover
@@ -1651,20 +1682,24 @@ impl Toolbar {
         cfg: &Rc<RefCell<PenCfg>>,
         preview: &gtk::DrawingArea,
         trow: &gtk::Box,
+        swatches: &Swatches,
     ) -> gtk::Button {
         let b = gtk::Button::new();
         b.add_css_class("flat");
         b.add_css_class("swatch-btn");
         b.set_child(Some(&color_swatch(rgba_of(&self.inner.canvas, color), 22)));
+        swatches.borrow_mut().push((b.clone(), Some(color)));
         let t = self.clone();
         let cfg = cfg.clone();
         let preview = preview.clone();
         let trow = trow.clone();
+        let sw = swatches.clone();
         b.connect_clicked(move |_| {
             cfg.borrow_mut().color = color;
             t.push_recent(color);
             t.commit_pen(idx, &cfg, &preview);
             redraw_children(&trow);
+            mark_selected(&sw, Some(color));
         });
         b
     }
@@ -1775,6 +1810,25 @@ fn load_state() -> ToolbarState {
         .and_then(|t| serde_json::from_str::<ToolbarState>(&t).ok())
         .filter(|s| !s.pens.is_empty())
         .unwrap_or_default()
+}
+
+/// Swatch buttons in a flyout with the color each one represents
+/// (None = theme ink / default), so the current one can be outlined.
+type Swatches = Rc<RefCell<Vec<(gtk::Button, Option<SemanticColor>)>>>;
+
+fn mark_selected(swatches: &Swatches, current: Option<SemanticColor>) {
+    for (b, c) in swatches.borrow().iter() {
+        set_selected_css(b, *c == current);
+    }
+}
+
+/// Accent border around the chosen option in a flyout.
+fn set_selected_css(w: &gtk::Button, selected: bool) {
+    if selected {
+        w.add_css_class("option-selected");
+    } else {
+        w.remove_css_class("option-selected");
+    }
 }
 
 fn set_active_css(w: &gtk::Button, active: bool) {

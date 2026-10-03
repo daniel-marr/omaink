@@ -987,6 +987,12 @@ impl CanvasView {
         textmod::StyleState { color: self.imp().state.borrow().text_color, ..Default::default() }
     }
 
+    /// List kind of the line the cursor is on (None = plain paragraph).
+    pub fn text_list_kind(&self) -> Option<textmod::ListKind> {
+        let ed = self.editor().filter(|_| self.is_editing_text())?;
+        ed.current_list_kind()
+    }
+
     /// Color the selection / next typed text; also the default for new text.
     pub fn text_set_color(&self, color: Option<SemanticColor>) {
         self.imp().state.borrow_mut().text_color = color;

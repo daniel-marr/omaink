@@ -278,6 +278,11 @@ window {{
     min-width: 0;
     padding: 2px;
 }}
+/* The chosen option in a flyout (color, list type, style). */
+.option-selected {{
+    box-shadow: inset 0 0 0 2px {accent};
+    border-radius: 5px;
+}}
 
 /* Keep full contrast when the window is unfocused: notes stay readable on a
    second monitor during calls. Overrides libadwaita's backdrop dimming. */

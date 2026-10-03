@@ -766,6 +766,16 @@ impl TextEditor {
         }
     }
 
+    /// List kind of the cursor's line.
+    pub fn current_list_kind(&self) -> Option<ListKind> {
+        match self.line_marker(self.cursor_line())?.0 {
+            ParaKind::Bullet => Some(ListKind::Bullet),
+            ParaKind::Number => Some(ListKind::Number),
+            ParaKind::Check { .. } => Some(ListKind::Check),
+            ParaKind::Body => None,
+        }
+    }
+
     /// Apply a list kind to the selected lines, or remove it when every
     /// selected line already has it.
     pub fn toggle_list(&self, kind: ListKind) {

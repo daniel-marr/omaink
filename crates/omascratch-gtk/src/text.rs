@@ -20,11 +20,10 @@ pub const DEFAULT_WIDTH: f64 = 420.0;
 /// Hanging indent for list paragraphs, in font sizes.
 pub const LIST_INDENT_EM: f64 = 1.6;
 
-pub const MARK_BULLET: &str = "• ";
-/// "◻" rather than "☐": ☐ falls back to fonts with a very deep descent,
-/// which would make checklist lines taller than the rule pitch.
-pub const MARK_CHECK: &str = "◻ ";
-pub const MARK_CHECKED: &str = "☑ ";
+/// Editor list marker: one invisible zero-width character at the start of
+/// a list line. Its tags carry the list kind; the canvas draws the real
+/// bullet / number / checkbox beside the editor, exactly as on the page.
+pub const MARKER: &str = "\u{200B}";
 
 pub fn highlight_rgba() -> gdk::RGBA {
     gdk::RGBA::new(0.98, 0.86, 0.33, 0.55)
@@ -197,49 +196,62 @@ pub fn draw_text(
     color: &gdk::RGBA,
 ) {
     for p in &tl.paras {
-        let base = y + p.baseline;
-        match p.prefix {
-            Prefix::None => {}
-            Prefix::Bullet => {
-                let r = font_size * 0.15;
-                let cy = base - font_size * 0.33;
-                let pb = gsk::PathBuilder::new();
-                pb.add_circle(&graphene::Point::new((x + font_size * 0.55) as f32, cy as f32), r as f32);
-                snapshot.append_fill(&pb.to_path(), gsk::FillRule::Winding, color);
-            }
-            Prefix::Number(n) => {
-                let l = pango::Layout::new(ctx);
-                l.set_font_description(Some(&font_for(ctx, font_size)));
-                l.set_text(&format!("{n}."));
-                let bl = l.baseline() as f64 / pango::SCALE as f64;
-                snapshot.save();
-                snapshot.translate(&graphene::Point::new(x as f32, (base - bl) as f32));
-                snapshot.append_layout(&l, color);
-                snapshot.restore();
-            }
-            Prefix::Check(checked) => {
-                let s = font_size * 0.75;
-                let by = base - s;
-                let pb = gsk::PathBuilder::new();
-                pb.add_rect(&graphene::Rect::new(x as f32, by as f32, s as f32, s as f32));
-                let stroke = gsk::Stroke::new((font_size * 0.08).max(1.0) as f32);
-                snapshot.append_stroke(&pb.to_path(), &stroke, color);
-                if checked {
-                    let ck = gsk::PathBuilder::new();
-                    ck.move_to((x + s * 0.2) as f32, (by + s * 0.52) as f32);
-                    ck.line_to((x + s * 0.42) as f32, (by + s * 0.75) as f32);
-                    ck.line_to((x + s * 0.82) as f32, (by + s * 0.25) as f32);
-                    let st = gsk::Stroke::new((font_size * 0.1).max(1.2) as f32);
-                    st.set_line_cap(gsk::LineCap::Round);
-                    st.set_line_join(gsk::LineJoin::Round);
-                    snapshot.append_stroke(&ck.to_path(), &st, color);
-                }
-            }
-        }
+        draw_prefix(snapshot, ctx, &p.prefix, x, y + p.baseline, font_size, color);
         snapshot.save();
         snapshot.translate(&graphene::Point::new((x + p.indent) as f32, (y + p.y + p.shift) as f32));
         snapshot.append_layout(&p.layout, color);
         snapshot.restore();
+    }
+}
+
+/// Draw a list prefix (bullet, number, checkbox) whose line baseline is
+/// `base`, at box-left `x`, in world units.
+pub fn draw_prefix(
+    snapshot: &gtk::Snapshot,
+    ctx: &pango::Context,
+    prefix: &Prefix,
+    x: f64,
+    base: f64,
+    font_size: f64,
+    color: &gdk::RGBA,
+) {
+    match *prefix {
+        Prefix::None => {}
+        Prefix::Bullet => {
+            let r = font_size * 0.15;
+            let cy = base - font_size * 0.33;
+            let pb = gsk::PathBuilder::new();
+            pb.add_circle(&graphene::Point::new((x + font_size * 0.55) as f32, cy as f32), r as f32);
+            snapshot.append_fill(&pb.to_path(), gsk::FillRule::Winding, color);
+        }
+        Prefix::Number(n) => {
+            let l = pango::Layout::new(ctx);
+            l.set_font_description(Some(&font_for(ctx, font_size)));
+            l.set_text(&format!("{n}."));
+            let bl = l.baseline() as f64 / pango::SCALE as f64;
+            snapshot.save();
+            snapshot.translate(&graphene::Point::new(x as f32, (base - bl) as f32));
+            snapshot.append_layout(&l, color);
+            snapshot.restore();
+        }
+        Prefix::Check(checked) => {
+            let s = font_size * 0.75;
+            let by = base - s;
+            let pb = gsk::PathBuilder::new();
+            pb.add_rect(&graphene::Rect::new(x as f32, by as f32, s as f32, s as f32));
+            let stroke = gsk::Stroke::new((font_size * 0.08).max(1.0) as f32);
+            snapshot.append_stroke(&pb.to_path(), &stroke, color);
+            if checked {
+                let ck = gsk::PathBuilder::new();
+                ck.move_to((x + s * 0.2) as f32, (by + s * 0.52) as f32);
+                ck.line_to((x + s * 0.42) as f32, (by + s * 0.75) as f32);
+                ck.line_to((x + s * 0.82) as f32, (by + s * 0.25) as f32);
+                let st = gsk::Stroke::new((font_size * 0.1).max(1.2) as f32);
+                st.set_line_cap(gsk::LineCap::Round);
+                st.set_line_join(gsk::LineJoin::Round);
+                snapshot.append_stroke(&ck.to_path(), &st, color);
+            }
+        }
     }
 }
 
@@ -280,6 +292,11 @@ pub struct TextEditor {
     underline: gtk::TextTag,
     highlight: gtk::TextTag,
     marker: gtk::TextTag,
+    /// List kind carried by a marker: bullet, number, check, checked.
+    k_bullet: gtk::TextTag,
+    k_number: gtk::TextTag,
+    k_check: gtk::TextTag,
+    k_checked: gtk::TextTag,
     list: gtk::TextTag,
     /// One tag per span color in use.
     color_tags: RefCell<Vec<(SemanticColor, gtk::TextTag)>>,
@@ -314,7 +331,11 @@ impl TextEditor {
         let highlight = gtk::TextTag::builder().name("highlight").background_rgba(&highlight_rgba()).build();
         let marker = gtk::TextTag::builder().name("marker").editable(false).build();
         let list = gtk::TextTag::builder().name("list").build();
-        for t in [&bold, &italic, &underline, &highlight, &marker, &list] {
+        let k_bullet = gtk::TextTag::builder().name("k-bullet").build();
+        let k_number = gtk::TextTag::builder().name("k-number").build();
+        let k_check = gtk::TextTag::builder().name("k-check").build();
+        let k_checked = gtk::TextTag::builder().name("k-checked").build();
+        for t in [&bold, &italic, &underline, &highlight, &marker, &list, &k_bullet, &k_number, &k_check, &k_checked] {
             table.add(t);
         }
 
@@ -331,6 +352,10 @@ impl TextEditor {
             underline,
             highlight,
             marker,
+            k_bullet,
+            k_number,
+            k_check,
+            k_checked,
             list,
             color_tags: RefCell::new(Vec::new()),
             resolver: RefCell::new(None),
@@ -571,33 +596,14 @@ impl TextEditor {
     pub fn load(&self, tb: &TextBox) {
         self.internal.set(true);
         self.buffer.set_text("");
-        let mut number = 0u32;
         for (i, p) in tb.paras.iter().enumerate() {
             if i > 0 {
                 let mut end = self.buffer.end_iter();
                 self.buffer.insert(&mut end, "\n");
             }
-            let marker = match p.kind {
-                ParaKind::Body => {
-                    number = 0;
-                    None
-                }
-                ParaKind::Bullet => {
-                    number = 0;
-                    Some(MARK_BULLET.to_string())
-                }
-                ParaKind::Number => {
-                    number += 1;
-                    Some(format!("{number}. "))
-                }
-                ParaKind::Check { checked } => {
-                    number = 0;
-                    Some(if checked { MARK_CHECKED } else { MARK_CHECK }.to_string())
-                }
-            };
-            if let Some(m) = marker {
+            if p.kind != ParaKind::Body {
                 let mut end = self.buffer.end_iter();
-                self.buffer.insert_with_tags(&mut end, &m, &[&self.marker]);
+                self.insert_marker(&mut end, p.kind);
             }
             for span in &p.spans {
                 let mut tags: Vec<gtk::TextTag> = Vec::new();
@@ -648,13 +654,12 @@ impl TextEditor {
         while mend < end && mend.has_tag(&self.marker) {
             mend.forward_char();
         }
-        let text = self.buffer.text(&start, &mend, true).to_string();
-        let kind = if text == MARK_BULLET {
+        let kind = if start.has_tag(&self.k_bullet) {
             ParaKind::Bullet
-        } else if text == MARK_CHECK {
-            ParaKind::Check { checked: false }
-        } else if text == MARK_CHECKED {
+        } else if start.has_tag(&self.k_checked) {
             ParaKind::Check { checked: true }
+        } else if start.has_tag(&self.k_check) {
+            ParaKind::Check { checked: false }
         } else {
             ParaKind::Number
         };
@@ -704,13 +709,18 @@ impl TextEditor {
 
     // -- lists --
 
-    fn marker_text(kind: ParaKind, n: u32) -> String {
-        match kind {
-            ParaKind::Body => String::new(),
-            ParaKind::Bullet => MARK_BULLET.to_string(),
-            ParaKind::Number => format!("{n}. "),
-            ParaKind::Check { checked } => if checked { MARK_CHECKED } else { MARK_CHECK }.to_string(),
-        }
+    /// Insert the invisible marker for `kind` at `at` (no-op for Body).
+    fn insert_marker(&self, at: &mut gtk::TextIter, kind: ParaKind) {
+        let k = match kind {
+            ParaKind::Body => return,
+            ParaKind::Bullet => &self.k_bullet,
+            ParaKind::Number => &self.k_number,
+            ParaKind::Check { checked: false } => &self.k_check,
+            ParaKind::Check { checked: true } => &self.k_checked,
+        };
+        let was = self.internal.replace(true);
+        self.buffer.insert_with_tags(at, MARKER, &[&self.marker, k]);
+        self.internal.set(was);
     }
 
     fn set_line_kind(&self, line: i32, kind: ParaKind) {
@@ -720,35 +730,14 @@ impl TextEditor {
             let mut e = mend;
             self.buffer.delete(&mut s, &mut e);
         }
-        let text = Self::marker_text(kind, 1);
-        if !text.is_empty() {
-            let mut s = self.buffer.iter_at_line(line).unwrap();
-            self.buffer.insert_with_tags(&mut s, &text, &[&self.marker]);
-        }
+        let mut s = self.buffer.iter_at_line(line).unwrap();
+        self.insert_marker(&mut s, kind);
         self.internal.set(false);
     }
 
-    /// Renumber numbered runs and refresh the hanging-indent tag.
+    /// Refresh the list-indent tag on list lines.
     fn retag_lists(&self) {
         let was = self.internal.replace(true);
-        let mut n = 0u32;
-        for line in 0..self.buffer.line_count() {
-            match self.line_marker(line) {
-                Some((ParaKind::Number, mend)) => {
-                    n += 1;
-                    let want = format!("{n}. ");
-                    let s = self.buffer.iter_at_line(line).unwrap();
-                    if self.buffer.text(&s, &mend, true) != want {
-                        let mut s2 = s;
-                        let mut e2 = mend;
-                        self.buffer.delete(&mut s2, &mut e2);
-                        let mut s3 = self.buffer.iter_at_line(line).unwrap();
-                        self.buffer.insert_with_tags(&mut s3, &want, &[&self.marker]);
-                    }
-                }
-                _ => n = 0,
-            }
-        }
         let (s, e) = self.buffer.bounds();
         self.buffer.remove_tag(&self.list, &s, &e);
         for line in 0..self.buffer.line_count() {
@@ -801,6 +790,38 @@ impl TextEditor {
             ParaKind::Check { .. } => Some(ListKind::Check),
             ParaKind::Body => None,
         }
+    }
+
+    /// List prefixes with their paragraph tops in view pixels (tests only:
+    /// it queries TextView geometry, which must not happen mid-snapshot).
+    #[cfg(test)]
+    pub fn prefixes(&self) -> Vec<(f64, Prefix)> {
+        let mut out = Vec::new();
+        let mut n = 0u32;
+        for line in 0..self.buffer.line_count() {
+            let kind = self.line_marker(line).map(|(k, _)| k).unwrap_or(ParaKind::Body);
+            let prefix = match kind {
+                ParaKind::Body => {
+                    n = 0;
+                    continue;
+                }
+                ParaKind::Bullet => {
+                    n = 0;
+                    Prefix::Bullet
+                }
+                ParaKind::Number => {
+                    n += 1;
+                    Prefix::Number(n)
+                }
+                ParaKind::Check { checked } => {
+                    n = 0;
+                    Prefix::Check(checked)
+                }
+            };
+            let Some(it) = self.buffer.iter_at_line(line) else { continue };
+            out.push((self.view.line_yrange(&it).0 as f64, prefix));
+        }
+        out
     }
 
     /// Apply a list kind to the selected lines, or remove it when every
@@ -856,8 +877,7 @@ impl TextEditor {
         self.internal.set(true);
         let mut cur = self.buffer.iter_at_offset(self.buffer.cursor_position());
         self.buffer.insert(&mut cur, "\n");
-        let text = Self::marker_text(next, 1);
-        self.buffer.insert_with_tags(&mut cur, &text, &[&self.marker]);
+        self.insert_marker(&mut cur, next);
         self.buffer.place_cursor(&cur);
         self.internal.set(false);
         self.retag_lists();
@@ -909,21 +929,8 @@ impl TextEditor {
         };
         let (body_a, body_d) = line_ad("Ag");
         let body_h = (body_a + body_d).max(natural_px);
-        // Marker glyphs (☐/☑) are often missing from the UI font; a fallback
-        // font with a taller ascent or descent would push list lines apart
-        // while editing. Shrink markers until they fit inside the body line.
-        let scale = [MARK_BULLET, MARK_CHECK, MARK_CHECKED, "8. "]
-            .iter()
-            .map(|m| {
-                let (a, d) = line_ad(m);
-                let fa = if a > body_a && a > 0.0 { body_a / a } else { 1.0 };
-                let fd = if d > body_d && d > 0.0 { body_d / d } else { 1.0 };
-                fa.min(fd)
-            })
-            .fold(1.0, f64::min);
-        self.marker.set_scale(scale);
         if std::env::var_os("OMASCRATCH_DEBUG_TEXT").is_some() {
-            eprintln!("[text] restyle: font={font_px:.1} natural={natural_px:.1} body={body_h:.2} marker_scale={scale:.2}");
+            eprintln!("[text] restyle: font={font_px:.1} natural={natural_px:.1} body={body_h:.2}");
         }
         // Each visual line gets the leftover cell space ABOVE it, so the
         // baseline lands where the canvas puts it (cell bottom - descent).
@@ -932,8 +939,10 @@ impl TextEditor {
         self.view.set_pixels_inside_wrap(extra);
         self.view.set_pixels_below_lines(0);
         let indent = (font_px * LIST_INDENT_EM) as i32;
+        // Same indent as the canvas layout: every line of a list paragraph
+        // starts at the indent; the marker itself is zero-width.
         self.list.set_left_margin(indent);
-        self.list.set_indent(-indent);
+        self.list.set_indent(0);
     }
 }
 
@@ -991,9 +1000,17 @@ mod tests {
             ]);
             ed.load(&original);
             assert_eq!(ed.to_paras(), original.paras, "load -> to_paras is lossless");
-            let (s, e) = ed.buffer.bounds();
-            let text = ed.buffer.text(&s, &e, true).to_string();
-            assert!(text.contains("1. one") && text.contains("2. two"), "{text}");
+            let kinds: Vec<String> = ed
+                .prefixes()
+                .iter()
+                .map(|(_, p)| match p {
+                    Prefix::Number(n) => format!("{n}."),
+                    Prefix::Check(c) => format!("check:{c}"),
+                    Prefix::Bullet => "bullet".into(),
+                    Prefix::None => "none".into(),
+                })
+                .collect();
+            assert_eq!(kinds, ["1.", "2.", "check:true", "bullet"]);
         });
     }
 
@@ -1138,6 +1155,21 @@ mod tests {
                     .collect();
                 let want: Vec<i32> = (0..5).map(|i| i * cell as i32).collect();
                 assert_eq!(ys, want, "font {font}: every line sits on the {cell}px rule pitch");
+                // List text starts at the page's list indent; body at 0.
+                let text_x = |l: i32| {
+                    let mut it = ed.buffer.iter_at_line(l).unwrap();
+                    if it.has_tag(&ed.marker) {
+                        it.forward_char();
+                    }
+                    ed.view.iter_location(&it).x()
+                };
+                let indent = (font * LIST_INDENT_EM) as i32;
+                assert_eq!(text_x(0), 0, "font {font}: body text at the box edge");
+                for l in 1..5 {
+                    assert!((text_x(l) - indent).abs() <= 1, "font {font} line {l}: text x {} vs indent {indent}", text_x(l));
+                }
+                let tops: Vec<i32> = ed.prefixes().iter().map(|(y, _)| *y as i32).collect();
+                assert_eq!(tops, want[1..].to_vec(), "prefix rows follow the lines");
             }
             win.close();
         });

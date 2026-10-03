@@ -684,6 +684,15 @@ impl CanvasView {
         ed.buffer.connect_changed(move |_| {
             if let Some(v) = weak.upgrade() {
                 v.schedule_checkpoint();
+                // List prefixes are drawn by the canvas: redraw now and once
+                // the TextView has re-laid out its lines.
+                v.queue_draw();
+                let w = v.downgrade();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(40), move || {
+                    if let Some(v) = w.upgrade() {
+                        v.queue_draw();
+                    }
+                });
             }
         });
         *self.imp().editor.borrow_mut() = Some(ed);
@@ -2923,6 +2932,19 @@ impl CanvasView {
                 textmod::draw_text(snapshot, &ctx, tl, tb.x, tb.y, tb.font_size, &color);
             }
             snapshot.restore();
+        }
+        // The box being edited: the overlay editor draws the text, the
+        // canvas draws its list prefixes exactly as on the page.
+        // Positions come from the page layout of the live text (never ask
+        // the TextView for geometry mid-snapshot: that breaks its layout).
+        if let (Some(sess), Some(ed)) = (st.editing.as_ref(), self.editor()) {
+            let mut w = sess.working.clone();
+            w.paras = ed.to_paras();
+            let tl = textmod::layout_text(&ctx, &w, Self::text_cell(&st, w.font_size), &Self::text_resolver(&st));
+            let color = resolve_color_inv(w.color, Tool::Pen, st.inverted, &st.palette);
+            for p in &tl.paras {
+                textmod::draw_prefix(snapshot, &ctx, &p.prefix, w.x, w.y + p.baseline, w.font_size, &color);
+            }
         }
 
         // Committed strokes: cached node per stroke, culled by bounds.

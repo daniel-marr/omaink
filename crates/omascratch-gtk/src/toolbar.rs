@@ -306,6 +306,41 @@ fn image_glyph() -> gtk::DrawingArea {
     area
 }
 
+/// Format-group button: markup label, never steals focus from the editor.
+fn fmt_button(markup: &str, tip: &str) -> gtk::Button {
+    let label = gtk::Label::new(None);
+    label.set_markup(markup);
+    let b = gtk::Button::new();
+    b.set_child(Some(&label));
+    b.add_css_class("flat");
+    b.set_focus_on_click(false);
+    b.set_tooltip_text(Some(tip));
+    b
+}
+
+/// Text tool icon: a bold serif-style "T".
+fn text_glyph() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(22);
+    area.set_content_height(22);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(|_, cr, w, h| {
+        let w = w as f64;
+        let h = h as f64;
+        cr.set_source_rgb(0.78, 0.82, 0.96);
+        // Top bar with small serifs.
+        cr.rectangle(w * 0.18, h * 0.14, w * 0.64, h * 0.14);
+        cr.rectangle(w * 0.18, h * 0.14, w * 0.07, h * 0.24);
+        cr.rectangle(w * 0.75, h * 0.14, w * 0.07, h * 0.24);
+        // Stem and foot.
+        cr.rectangle(w * 0.43, h * 0.14, w * 0.14, h * 0.70);
+        cr.rectangle(w * 0.33, h * 0.78, w * 0.34, h * 0.08);
+        let _ = cr.fill();
+    });
+    area
+}
+
 /// Hand (pan) icon: a simple mitten-style hand.
 fn hand_glyph() -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
@@ -509,6 +544,7 @@ enum Mode {
     Pen(usize),
     Shape(ShapeKind),
     Pan,
+    Text,
 }
 
 struct Inner {
@@ -535,6 +571,11 @@ struct Inner {
     lasso_btn: gtk::Button,
     pan_btn: gtk::Button,
     shapes_btn: gtk::MenuButton,
+    text_btn: gtk::Button,
+    /// Format controls, shown only while a text box is being edited.
+    fmt_group: gtk::Box,
+    fmt_toggles: [gtk::Button; 4],
+    fmt_size: gtk::Label,
 }
 
 #[derive(Clone)]
@@ -568,6 +609,22 @@ impl Toolbar {
         pan_btn.add_css_class("flat");
         pan_btn.set_child(Some(&hand_glyph()));
         pan_btn.set_tooltip_text(Some("Pan canvas (hand)"));
+        let text_btn = gtk::Button::new();
+        text_btn.add_css_class("flat");
+        text_btn.set_child(Some(&text_glyph()));
+        text_btn.set_tooltip_text(Some("Text (click the page to type)"));
+        let fmt_group = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        fmt_group.add_css_class("text-format-group");
+        fmt_group.set_visible(false);
+        let fmt_toggles = [
+            fmt_button("<b>B</b>", "Bold (Ctrl+B)"),
+            fmt_button("<i>I</i>", "Italic (Ctrl+I)"),
+            fmt_button("<u>U</u>", "Underline (Ctrl+U)"),
+            fmt_button("<span background=\"#fadf6b\" foreground=\"#1a1b26\"> ab </span>", "Highlight (Ctrl+Shift+H)"),
+        ];
+        let fmt_size = gtk::Label::new(Some("18"));
+        fmt_size.add_css_class("dim-label");
+        fmt_size.set_width_chars(3);
         let shapes_btn = gtk::MenuButton::new();
         shapes_btn.add_css_class("flat");
         shapes_btn.set_child(Some(&shapes_glyph()));
@@ -593,6 +650,10 @@ impl Toolbar {
             lasso_btn: lasso_btn.clone(),
             pan_btn: pan_btn.clone(),
             shapes_btn: shapes_btn.clone(),
+            text_btn: text_btn.clone(),
+            fmt_group: fmt_group.clone(),
+            fmt_toggles: fmt_toggles.clone(),
+            fmt_size: fmt_size.clone(),
         });
         let tb = Toolbar { widget, inner };
 
@@ -727,6 +788,55 @@ impl Toolbar {
             });
             tb.widget.append(&shapes_btn);
         }
+        // Text tool + its contextual format group.
+        {
+            let t = tb.clone();
+            text_btn.connect_clicked(move |_| t.set_mode(Mode::Text));
+            tb.widget.append(&text_btn);
+
+            use crate::text::{Fmt, ListKind};
+            for (btn, f) in fmt_toggles.iter().zip([Fmt::Bold, Fmt::Italic, Fmt::Underline, Fmt::Highlight]) {
+                let c = canvas.clone();
+                btn.connect_clicked(move |_| c.text_format(f));
+                fmt_group.append(btn);
+            }
+            fmt_group.append(&vsep());
+            for (label, tip, k) in [
+                ("•  ⋯", "Bulleted list", ListKind::Bullet),
+                ("1. ⋯", "Numbered list", ListKind::Number),
+                ("☐  ⋯", "Checklist (Ctrl+1)", ListKind::Check),
+            ] {
+                let b = fmt_button(label, tip);
+                let c = canvas.clone();
+                b.connect_clicked(move |_| c.text_list(k));
+                fmt_group.append(&b);
+            }
+            fmt_group.append(&vsep());
+            let smaller = fmt_button("A−", "Smaller text");
+            let larger = fmt_button("A+", "Larger text");
+            let c = canvas.clone();
+            let lbl = fmt_size.clone();
+            smaller.connect_clicked(move |_| {
+                if let Some(sz) = c.text_font_step(false) {
+                    lbl.set_text(&format!("{sz:.0}"));
+                }
+            });
+            let c = canvas.clone();
+            let lbl = fmt_size.clone();
+            larger.connect_clicked(move |_| {
+                if let Some(sz) = c.text_font_step(true) {
+                    lbl.set_text(&format!("{sz:.0}"));
+                }
+            });
+            fmt_group.append(&smaller);
+            fmt_group.append(&fmt_size);
+            fmt_group.append(&larger);
+            tb.widget.append(&fmt_group);
+
+            // Show/hide the group and reflect B/I/U/H at the cursor.
+            let t = tb.clone();
+            canvas.set_on_text_state(move |state| t.update_text_state(state));
+        }
         // Format Background ▾ — rule/grid lines, margin.
         let bg_btn = gtk::MenuButton::new();
         bg_btn.add_css_class("flat");
@@ -761,6 +871,21 @@ impl Toolbar {
         // Apply the restored mode.
         tb.set_mode(tb.inner.mode.get());
         tb
+    }
+
+    fn update_text_state(&self, state: Option<crate::text::StyleState>) {
+        match state {
+            None => self.inner.fmt_group.set_visible(false),
+            Some(st) => {
+                self.inner.fmt_group.set_visible(true);
+                for (b, on) in self.inner.fmt_toggles.iter().zip([st.bold, st.italic, st.underline, st.highlight]) {
+                    set_active_css(b, on);
+                }
+                self.inner
+                    .fmt_size
+                    .set_text(&format!("{:.0}", self.inner.canvas.text_font_size()));
+            }
+        }
     }
 
     /// Switch to the Select tool (e.g. right after pasting an image).
@@ -859,6 +984,9 @@ impl Toolbar {
             Mode::Pan => {
                 self.inner.canvas.set_active_tool(ActiveTool::Pan);
             }
+            Mode::Text => {
+                self.inner.canvas.set_active_tool(ActiveTool::Text);
+            }
             Mode::Shape(kind) => {
                 self.inner.last_shape.set(kind);
                 self.inner.canvas.set_shape_tool(kind);
@@ -885,6 +1013,7 @@ impl Toolbar {
         set_active_css(&self.inner.select_btn, mode == Mode::Select);
         set_active_css(&self.inner.lasso_btn, mode == Mode::Lasso);
         set_active_css(&self.inner.pan_btn, mode == Mode::Pan);
+        set_active_css(&self.inner.text_btn, mode == Mode::Text);
         if matches!(mode, Mode::Shape(_)) {
             self.inner.shapes_btn.add_css_class("mode-active");
         } else {

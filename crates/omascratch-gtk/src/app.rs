@@ -94,6 +94,7 @@ fn build_window(app: &adw::Application) {
 
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&canvas));
+    canvas.attach_editor_host(&overlay);
 
     let content_view = adw::ToolbarView::new();
     content_view.set_top_bar_style(adw::ToolbarStyle::Flat);

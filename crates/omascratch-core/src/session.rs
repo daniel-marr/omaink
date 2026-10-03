@@ -2,6 +2,7 @@
 //! undo/redo. Owns authoritative content; the UI holds only transient state.
 
 use crate::note::{ImageItem, NoteContent};
+use crate::text::TextBox;
 use crate::stroke::{Stroke, StrokeId};
 
 /// An undoable edit. Each variant stores exactly what `revert` needs.
@@ -31,6 +32,11 @@ pub enum Command {
         images_before: Vec<ImageItem>,
         images_after: Vec<ImageItem>,
     },
+    /// Same exact before/after semantics, for text boxes.
+    ReplaceTexts { before: Vec<TextBox>, after: Vec<TextBox> },
+    /// Several commands as one undo step (applied in order, reverted in
+    /// reverse) — e.g. moving a selection that mixes ink, images and text.
+    Batch(Vec<Command>),
 }
 
 #[derive(Debug, Default)]
@@ -96,6 +102,12 @@ impl NoteSession {
             Command::Replace { strokes_before, strokes_after, images_before, images_after } => {
                 self.replace(strokes_before, strokes_after, images_before, images_after)
             }
+            Command::ReplaceTexts { before, after } => self.replace_texts(before, after),
+            Command::Batch(cmds) => {
+                for c in cmds {
+                    self.apply(c);
+                }
+            }
         }
     }
 
@@ -118,6 +130,30 @@ impl NoteSession {
             Command::TranslateStrokes { ids, dx, dy } => self.translate(ids, -*dx, -*dy),
             Command::Replace { strokes_before, strokes_after, images_before, images_after } => {
                 self.replace(strokes_after, strokes_before, images_after, images_before)
+            }
+            Command::ReplaceTexts { before, after } => self.replace_texts(after, before),
+            Command::Batch(cmds) => {
+                for c in cmds.iter().rev() {
+                    self.revert(c);
+                }
+            }
+        }
+    }
+
+    fn replace_texts(&mut self, from: &[TextBox], to: &[TextBox]) {
+        for b in from {
+            if let Some(idx) = self.content.text_index(b.id) {
+                match to.iter().find(|a| a.id == b.id) {
+                    Some(a) => self.content.texts[idx] = a.clone(),
+                    None => {
+                        self.content.texts.remove(idx);
+                    }
+                }
+            }
+        }
+        for a in to {
+            if !from.iter().any(|b| b.id == a.id) {
+                self.content.texts.push(a.clone());
             }
         }
     }
@@ -310,6 +346,37 @@ mod tests {
             images_after: vec![],
         });
         assert_eq!(s.content.strokes[1], b2, "transformed stroke stays in place");
+    }
+
+    #[test]
+    fn batch_with_texts_is_one_exact_undo_step() {
+        use crate::text::{ParaKind, Paragraph, Span, TextBox};
+        let mut s = NoteSession::default();
+        let tb = TextBox {
+            id: crate::id::TextId::new(),
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 20.0,
+            font_size: 16.0,
+            color: crate::SemanticColor::Foreground,
+            paras: vec![Paragraph { kind: ParaKind::Body, spans: vec![Span { text: "hi".into(), ..Default::default() }] }],
+        };
+        s.dispatch(Command::ReplaceTexts { before: vec![], after: vec![tb.clone()] });
+        let a = stroke();
+        let mut moved = tb.clone();
+        moved.x = 40.0;
+        s.dispatch(Command::Batch(vec![
+            Command::AddStroke(a.clone()),
+            Command::ReplaceTexts { before: vec![tb.clone()], after: vec![moved.clone()] },
+        ]));
+        assert_eq!(s.content.texts[0], moved);
+        assert_eq!(s.content.strokes.len(), 1);
+        s.undo();
+        assert_eq!(s.content.texts[0], tb);
+        assert!(s.content.strokes.is_empty());
+        s.redo();
+        assert_eq!(s.content.texts[0], moved);
     }
 
     #[test]

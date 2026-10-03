@@ -33,6 +33,8 @@ pub enum DiskElement {
     Stroke(DiskStroke),
     /// Images reference an immutable asset file in `<note-id>.assets/`.
     Image(omascratch_core::ImageItem),
+    /// Typed text box (paragraphs of styled spans).
+    Text(omascratch_core::TextBox),
     /// Element kinds this build doesn't know. Kept verbatim and written back.
     #[serde(untagged)]
     Unknown(serde_json::Value),
@@ -162,6 +164,7 @@ impl NoteDoc {
             .map(|s| DiskElement::Stroke(s.into()))
             .collect();
         elements.extend(self.content.images.iter().cloned().map(DiskElement::Image));
+        elements.extend(self.content.texts.iter().cloned().map(DiskElement::Text));
         elements.extend(self.opaque_elements.iter().cloned().map(DiskElement::Unknown));
         NoteFileV1 {
             schema: NOTE_SCHEMA,
@@ -183,6 +186,7 @@ impl NoteDoc {
             match el {
                 DiskElement::Stroke(s) => content.strokes.push(s.into()),
                 DiskElement::Image(i) => content.images.push(i),
+                DiskElement::Text(t) => content.texts.push(t),
                 DiskElement::Unknown(v) => opaque.push(v),
             }
         }

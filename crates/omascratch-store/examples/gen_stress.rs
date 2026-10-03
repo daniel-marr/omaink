@@ -63,7 +63,7 @@ fn page(rng: &mut Rng, strokes: usize) -> NoteContent {
         let y = 60.0 + line as f64 * 40.0;
         out.push(scribble(rng, x, y));
     }
-    NoteContent { strokes: out, images: vec![] }
+    NoteContent { strokes: out, images: vec![], texts: vec![] }
 }
 
 fn doc(title: &str, folder: Option<omascratch_core::FolderId>, order_key: String, content: NoteContent) -> NoteDoc {

@@ -3,7 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::ImageId;
+use crate::id::{ImageId, TextId};
+use crate::text::TextBox;
 use crate::stroke::{Stroke, StrokeId};
 
 /// An image placed on the canvas. `asset` names an immutable file stored
@@ -32,6 +33,8 @@ pub struct NoteContent {
     pub strokes: Vec<Stroke>,
     #[serde(default)]
     pub images: Vec<ImageItem>,
+    #[serde(default)]
+    pub texts: Vec<TextBox>,
 }
 
 impl NoteContent {
@@ -41,5 +44,9 @@ impl NoteContent {
 
     pub fn image_index(&self, id: ImageId) -> Option<usize> {
         self.images.iter().position(|i| i.id == id)
+    }
+
+    pub fn text_index(&self, id: TextId) -> Option<usize> {
+        self.texts.iter().position(|t| t.id == id)
     }
 }

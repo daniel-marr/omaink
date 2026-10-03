@@ -33,6 +33,7 @@ id_type!(NotebookId);
 id_type!(FolderId);
 id_type!(NoteId);
 id_type!(ImageId);
+id_type!(TextId);
 
 #[cfg(test)]
 mod tests {

@@ -7,6 +7,7 @@ mod library;
 mod perf;
 mod sidebar;
 mod storage;
+mod text;
 mod theme;
 mod toolbar;
 

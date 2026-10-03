@@ -14,9 +14,10 @@ use gtk4::{gdk, gio, glib, graphene, gsk, prelude::*, subclass::prelude::*};
 use kurbo::PathEl;
 
 use omascratch_core::{
-    BackgroundKind, Command, ImageId, ImageItem, InkPoint, NoteSession, PageBackground, Rgba,
-    SemanticColor, Stroke, StrokeId, Tool,
+    BackgroundKind, Command, ImageId, ImageItem, InkPoint, NoteSession, PageBackground, ParaKind,
+    Rgba, SemanticColor, Stroke, StrokeId, TextBox, TextId, Tool,
 };
+use crate::text::{self as textmod, TextEditor, TextLayout};
 use std::path::PathBuf;
 
 // M1 fixed palette (Tokyo Night-ish). Replaced by the Omarchy theme adapter in M5.
@@ -81,6 +82,8 @@ pub enum ActiveTool {
     Shape,
     /// Hand tool: drag anywhere to pan the canvas.
     Pan,
+    /// Text tool: click to create or edit a text box.
+    Text,
 }
 
 impl ActiveTool {
@@ -109,6 +112,14 @@ fn tool_to_active(tool: Tool) -> ActiveTool {
         Tool::Highlighter => ActiveTool::Highlighter,
         Tool::Shape => ActiveTool::Shape,
     }
+}
+
+/// A text box open in the overlay editor. `original` is the last committed
+/// version (None for a brand-new box).
+struct EditSession {
+    original: Option<TextBox>,
+    working: TextBox,
+    last_view: (kurbo::Vec2, f64),
 }
 
 /// An in-progress corner-handle resize: proportional scale about `anchor`
@@ -172,6 +183,17 @@ pub struct State {
     /// Current selection + in-progress selection gestures.
     selection: HashSet<StrokeId>,
     sel_images: HashSet<ImageId>,
+    sel_texts: HashSet<TextId>,
+    /// Pango layouts per text box, valid for the current revision.
+    text_layouts: HashMap<TextId, TextLayout>,
+    clipboard_texts: Vec<TextBox>,
+    /// The text box being edited in the overlay editor (hidden on canvas).
+    editing: Option<EditSession>,
+    /// Font size for new text boxes (follows the last size used).
+    text_font_size: f64,
+    /// Shell hook: text editing state for the toolbar format group
+    /// (None = not editing).
+    on_text_state: Option<Box<dyn Fn(Option<textmod::StyleState>)>>,
     sel_resize: Option<ResizeDrag>,
     /// Select tool rubber-band rectangle: (start, current) in world units.
     marquee: Option<(kurbo::Point, kurbo::Point)>,
@@ -238,6 +260,12 @@ impl Default for State {
             erase_path: Vec::new(),
             selection: HashSet::new(),
             sel_images: HashSet::new(),
+            sel_texts: HashSet::new(),
+            text_layouts: HashMap::new(),
+            clipboard_texts: Vec::new(),
+            editing: None,
+            text_font_size: textmod::DEFAULT_FONT_SIZE,
+            on_text_state: None,
             sel_resize: None,
             marquee: None,
             asset_dir: None,
@@ -274,6 +302,9 @@ mod imp {
     #[derive(Default)]
     pub struct CanvasView {
         pub state: RefCell<State>,
+        pub editor: RefCell<Option<std::rc::Rc<TextEditor>>>,
+        pub checkpoint: RefCell<Option<glib::SourceId>>,
+        pub editor_tick: std::cell::Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -436,6 +467,7 @@ impl CanvasView {
     // ---- public API used by the shell ----
 
     pub fn undo(&self) {
+        self.commit_text_edit();
         let mut st = self.imp().state.borrow_mut();
         let changed = st.session.undo();
         if changed {
@@ -448,6 +480,7 @@ impl CanvasView {
     }
 
     pub fn redo(&self) {
+        self.commit_text_edit();
         let mut st = self.imp().state.borrow_mut();
         let changed = st.session.redo();
         if changed {
@@ -470,6 +503,9 @@ impl CanvasView {
         st.live_erased.clear();
         st.selection.clear();
         st.sel_images.clear();
+        st.sel_texts.clear();
+        st.text_layouts.clear();
+        st.editing = None;
         st.sel_resize = None;
         st.marquee = None;
         st.lassoing = false;
@@ -615,6 +651,375 @@ impl CanvasView {
         eprintln!("[perf] select click hit-test: {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
     }
 
+    // ---- text boxes ----
+
+    /// Host the rich-text editor in the overlay above the canvas.
+    pub fn attach_editor_host(&self, overlay: &gtk::Overlay) {
+        let ed = TextEditor::new();
+        overlay.add_overlay(&ed.view);
+
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = self.downgrade();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                if let Some(v) = weak.upgrade() {
+                    v.commit_text_edit();
+                    v.grab_focus();
+                }
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        ed.view.add_controller(keys);
+
+        // Focus leaving the editor finishes the edit (deferred: never inside
+        // the focus signal itself).
+        let focus = gtk::EventControllerFocus::new();
+        let weak = self.downgrade();
+        focus.connect_leave(move |_| {
+            let weak = weak.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(v) = weak.upgrade() {
+                    let still_focused = v
+                        .imp()
+                        .editor
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|e| e.view.has_focus());
+                    if !still_focused {
+                        v.commit_text_edit();
+                    }
+                }
+            });
+        });
+        ed.view.add_controller(focus);
+
+        let weak = self.downgrade();
+        ed.set_on_state(move |st| {
+            if let Some(v) = weak.upgrade() {
+                if v.is_editing_text() {
+                    v.emit_text_state(Some(st));
+                }
+            }
+        });
+        let weak = self.downgrade();
+        ed.buffer.connect_changed(move |_| {
+            if let Some(v) = weak.upgrade() {
+                v.schedule_checkpoint();
+            }
+        });
+        *self.imp().editor.borrow_mut() = Some(ed);
+    }
+
+    pub fn set_on_text_state(&self, f: impl Fn(Option<textmod::StyleState>) + 'static) {
+        self.imp().state.borrow_mut().on_text_state = Some(Box::new(f));
+    }
+
+    fn emit_text_state(&self, s: Option<textmod::StyleState>) {
+        let hook = self.imp().state.borrow_mut().on_text_state.take();
+        if let Some(hook) = hook {
+            hook(s);
+            let mut st = self.imp().state.borrow_mut();
+            if st.on_text_state.is_none() {
+                st.on_text_state = Some(hook);
+            }
+        }
+    }
+
+    pub fn is_editing_text(&self) -> bool {
+        self.imp().state.borrow().editing.is_some()
+    }
+
+    fn editor(&self) -> Option<std::rc::Rc<TextEditor>> {
+        self.imp().editor.borrow().clone()
+    }
+
+    /// Open the editor on `existing` (or a new box at `at`), optionally
+    /// placing the cursor at widget point `cursor_at`.
+    fn start_edit(&self, existing: Option<TextBox>, at: kurbo::Point, cursor_at: Option<(f64, f64)>) {
+        self.commit_text_edit();
+        let Some(ed) = self.editor() else { return };
+        let working = {
+            let mut st = self.imp().state.borrow_mut();
+            let fs = st.text_font_size;
+            let working = existing.clone().unwrap_or_else(|| TextBox {
+                id: TextId::new(),
+                x: at.x,
+                y: at.y - fs * 0.6,
+                w: textmod::DEFAULT_WIDTH,
+                h: fs * 1.2,
+                font_size: fs,
+                color: SemanticColor::Foreground,
+                paras: vec![omascratch_core::Paragraph { kind: ParaKind::Body, spans: vec![] }],
+            });
+            st.selection.clear();
+            st.sel_images.clear();
+            st.sel_texts.clear();
+            st.editing = Some(EditSession {
+                original: existing,
+                working: working.clone(),
+                last_view: (st.offset, st.zoom),
+            });
+            working
+        };
+        ed.load(&working);
+        self.sync_editor_geometry(true);
+        ed.view.set_visible(true);
+        ed.view.grab_focus();
+        if let Some((x, y)) = cursor_at {
+            let ed2 = ed.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(30), move || {
+                let bx = (x - ed2.view.margin_start() as f64) as i32;
+                let by = (y - ed2.view.margin_top() as f64) as i32;
+                let (bx, by) = ed2.view.window_to_buffer_coords(gtk::TextWindowType::Widget, bx, by);
+                if let Some(it) = ed2.view.iter_at_location(bx, by) {
+                    ed2.buffer.place_cursor(&it);
+                }
+            });
+        }
+        // Follow pan/zoom while editing.
+        if !self.imp().editor_tick.replace(true) {
+            self.add_tick_callback(|w, _| {
+                if !w.is_editing_text() {
+                    w.imp().editor_tick.set(false);
+                    return glib::ControlFlow::Break;
+                }
+                w.sync_editor_geometry(false);
+                glib::ControlFlow::Continue
+            });
+        }
+        self.queue_draw();
+        self.emit_text_state(Some(ed.current_style()));
+    }
+
+    /// Position, size and style the overlay editor over its box.
+    fn sync_editor_geometry(&self, force: bool) {
+        let Some(ed) = self.editor() else { return };
+        let (x, y, w, fs, offset, zoom, color, accent) = {
+            let mut st = self.imp().state.borrow_mut();
+            let (offset, zoom, inverted, palette) = (st.offset, st.zoom, st.inverted, st.palette);
+            let Some(sess) = st.editing.as_mut() else { return };
+            if !force && sess.last_view == (offset, zoom) {
+                return;
+            }
+            sess.last_view = (offset, zoom);
+            let t = &sess.working;
+            let color = resolve_color_inv(t.color, Tool::Pen, inverted, &palette);
+            (t.x, t.y, t.w, t.font_size, offset, zoom, color, palette.accent)
+        };
+        ed.view.set_margin_start(((x - offset.x) * zoom).max(0.0) as i32);
+        ed.view.set_margin_top(((y - offset.y) * zoom).max(0.0) as i32);
+        ed.view.set_size_request((w * zoom).max(40.0) as i32, -1);
+        ed.restyle(fs * zoom, &color, &accent);
+    }
+
+    /// Finish the current edit: one exact ReplaceTexts (add / change /
+    /// delete-when-blank). Safe to call when nothing is being edited.
+    pub fn commit_text_edit(&self) {
+        let session = self.imp().state.borrow_mut().editing.take();
+        let Some(session) = session else { return };
+        if let Some(id) = self.imp().checkpoint.borrow_mut().take() {
+            id.remove();
+        }
+        let Some(ed) = self.editor() else { return };
+        let mut working = session.working;
+        working.paras = ed.to_paras();
+        ed.view.set_visible(false);
+        let ctx = self.pango_context();
+        working.h = textmod::layout_text(&ctx, &working).height;
+        let changed = {
+            let mut st = self.imp().state.borrow_mut();
+            st.text_font_size = working.font_size;
+            match (session.original, working.is_blank()) {
+                (None, true) => false,
+                (Some(orig), true) => {
+                    st.session.dispatch(Command::ReplaceTexts { before: vec![orig], after: vec![] });
+                    true
+                }
+                (Some(orig), false) if orig == working => false,
+                (orig, false) => {
+                    st.session.dispatch(Command::ReplaceTexts {
+                        before: orig.into_iter().collect(),
+                        after: vec![working],
+                    });
+                    true
+                }
+            }
+        };
+        self.emit_text_state(None);
+        self.queue_draw();
+        if changed {
+            self.notify_changed();
+        }
+    }
+
+    fn schedule_checkpoint(&self) {
+        if !self.is_editing_text() {
+            return;
+        }
+        if let Some(id) = self.imp().checkpoint.borrow_mut().take() {
+            id.remove();
+        }
+        let weak = self.downgrade();
+        let id = glib::timeout_add_local_once(std::time::Duration::from_millis(2500), move || {
+            if let Some(v) = weak.upgrade() {
+                *v.imp().checkpoint.borrow_mut() = None;
+                v.checkpoint_text();
+            }
+        });
+        *self.imp().checkpoint.borrow_mut() = Some(id);
+    }
+
+    /// Crash protection while typing: after a pause, commit the current text
+    /// into the note (the edit stays open), so autosave picks it up.
+    fn checkpoint_text(&self) {
+        let Some(ed) = self.editor() else { return };
+        let ctx = self.pango_context();
+        let mut st = self.imp().state.borrow_mut();
+        let Some(sess) = st.editing.as_mut() else { return };
+        let mut w = sess.working.clone();
+        w.paras = ed.to_paras();
+        if w.is_blank() || sess.original.as_ref() == Some(&w) {
+            return;
+        }
+        w.h = textmod::layout_text(&ctx, &w).height;
+        let before: Vec<TextBox> = sess.original.clone().into_iter().collect();
+        sess.original = Some(w.clone());
+        sess.working = w.clone();
+        st.session.dispatch(Command::ReplaceTexts { before, after: vec![w] });
+        drop(st);
+        self.notify_changed();
+    }
+
+    /// Text-aware press handling, run before any gesture starts. Returns true
+    /// when the press was consumed (editing, checkbox toggle, new box).
+    fn text_press(&self, x: f64, y: f64) -> bool {
+        let (wp, active, editing_rect, zoom) = {
+            let st = self.imp().state.borrow();
+            let (wx, wy) = Self::widget_to_world(&st, x, y);
+            let rect = st.editing.as_ref().map(|e| {
+                let h = self
+                    .editor()
+                    .map(|ed| ed.view.height() as f64 / st.zoom)
+                    .unwrap_or(e.working.h)
+                    .max(e.working.h);
+                kurbo::Rect::new(e.working.x, e.working.y, e.working.x + e.working.w, e.working.y + h)
+            });
+            (kurbo::Point::new(wx, wy), st.active, rect, st.zoom)
+        };
+        if let Some(r) = editing_rect {
+            if r.inflate(6.0 / zoom, 6.0 / zoom).contains(wp) {
+                return true;
+            }
+            self.commit_text_edit();
+        }
+        if !matches!(active, ActiveTool::Select | ActiveTool::Text) {
+            return false;
+        }
+        if self.toggle_checkbox_at(wp) {
+            return true;
+        }
+        if active == ActiveTool::Text {
+            let hit = {
+                let st = self.imp().state.borrow();
+                Self::text_at(&st, wp)
+                    .and_then(|id| st.session.content.text_index(id))
+                    .map(|i| st.session.content.texts[i].clone())
+            };
+            match hit {
+                Some(tb) => self.start_edit(Some(tb), wp, Some((x, y))),
+                None => self.start_edit(None, wp, None),
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Click on a rendered checkbox toggles it (one undo step).
+    fn toggle_checkbox_at(&self, wp: kurbo::Point) -> bool {
+        let ctx = self.pango_context();
+        let mut st = self.imp().state.borrow_mut();
+        Self::ensure_bounds(&mut st);
+        let candidates: Vec<TextBox> = st
+            .session
+            .content
+            .texts
+            .iter()
+            .rev()
+            .filter(|t| t.rect().contains(wp))
+            .cloned()
+            .collect();
+        for tb in candidates {
+            if !st.text_layouts.contains_key(&tb.id) {
+                let tl = textmod::layout_text(&ctx, &tb);
+                st.text_layouts.insert(tb.id, tl);
+            }
+            let hit = st.text_layouts[&tb.id]
+                .check_rects(tb.font_size)
+                .into_iter()
+                .find(|(_, r)| r.inflate(2.0, 2.0).contains(kurbo::Point::new(wp.x - tb.x, wp.y - tb.y)))
+                .map(|(i, _)| i);
+            if let Some(pi) = hit {
+                let mut after = tb.clone();
+                if let ParaKind::Check { checked } = after.paras[pi].kind {
+                    after.paras[pi].kind = ParaKind::Check { checked: !checked };
+                }
+                st.session.dispatch(Command::ReplaceTexts { before: vec![tb], after: vec![after] });
+                drop(st);
+                self.queue_draw();
+                self.notify_changed();
+                return true;
+            }
+        }
+        false
+    }
+
+    // -- format group API (toolbar) --
+
+    pub fn text_format(&self, f: textmod::Fmt) {
+        if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
+            ed.toggle(f);
+            ed.view.grab_focus();
+        }
+    }
+
+    pub fn text_list(&self, k: textmod::ListKind) {
+        if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
+            ed.toggle_list(k);
+            ed.view.grab_focus();
+        }
+    }
+
+    /// Step the edited box's font size up/down through preset sizes.
+    pub fn text_font_step(&self, up: bool) -> Option<f64> {
+        const SIZES: [f64; 11] = [10.0, 12.0, 14.0, 16.0, 18.0, 22.0, 26.0, 32.0, 40.0, 48.0, 64.0];
+        let size = {
+            let mut st = self.imp().state.borrow_mut();
+            let sess = st.editing.as_mut()?;
+            let cur = sess.working.font_size;
+            let next = if up {
+                SIZES.iter().copied().find(|s| *s > cur + 0.01).unwrap_or(cur)
+            } else {
+                SIZES.iter().rev().copied().find(|s| *s < cur - 0.01).unwrap_or(cur)
+            };
+            sess.working.font_size = next;
+            next
+        };
+        self.imp().state.borrow_mut().text_font_size = size;
+        self.sync_editor_geometry(true);
+        if let Some(ed) = self.editor() {
+            ed.view.grab_focus();
+        }
+        self.schedule_checkpoint();
+        Some(size)
+    }
+
+    pub fn text_font_size(&self) -> f64 {
+        let st = self.imp().state.borrow();
+        st.editing.as_ref().map(|e| e.working.font_size).unwrap_or(st.text_font_size)
+    }
+
     /// Return to 100% zoom, anchored at the viewport center.
     pub fn zoom_to_100(&self) {
         let mut st = self.imp().state.borrow_mut();
@@ -636,6 +1041,7 @@ impl CanvasView {
     // ---- tool selection (driven by the draw toolbar) ----
 
     pub fn set_active_tool(&self, tool: ActiveTool) {
+        self.commit_text_edit();
         self.imp().state.borrow_mut().active = tool;
     }
 
@@ -645,6 +1051,7 @@ impl CanvasView {
 
     /// Select a pen preset: sets the active drawing tool, color and width.
     pub fn set_pen(&self, tool: Tool, color: SemanticColor, width: f64) {
+        self.commit_text_edit();
         let mut st = self.imp().state.borrow_mut();
         st.active = tool_to_active(tool);
         st.cur_color = color;
@@ -653,6 +1060,7 @@ impl CanvasView {
 
     /// Activate the shape tool with the given shape kind.
     pub fn set_shape_tool(&self, kind: omascratch_ink::ShapeKind) {
+        self.commit_text_edit();
         let mut st = self.imp().state.borrow_mut();
         st.active = ActiveTool::Shape;
         st.shape_kind = kind;
@@ -729,13 +1137,28 @@ impl CanvasView {
             .filter(|i| st.sel_images.contains(&i.id))
             .cloned()
             .collect();
-        let n = strokes.len() + images.len();
+        let texts: Vec<TextBox> = st
+            .session
+            .content
+            .texts
+            .iter()
+            .filter(|t| st.sel_texts.contains(&t.id))
+            .cloned()
+            .collect();
+        let n = strokes.len() + images.len() + texts.len();
         if n > 0 {
+            // Selected text also goes to the system clipboard as plain text.
+            let plain: Vec<String> = texts.iter().map(|t| t.plain_text()).collect();
             st.clipboard = strokes;
             st.clipboard_images = images;
+            st.clipboard_texts = texts;
             st.clipboard_asset_dir = st.asset_dir.clone();
             drop(st);
-            self.clipboard().set_text("OmaScratch selection");
+            if plain.is_empty() {
+                self.clipboard().set_text("OmaScratch selection");
+            } else {
+                self.clipboard().set_text(&plain.join("\n\n"));
+            }
         }
         n
     }
@@ -774,7 +1197,7 @@ impl CanvasView {
     /// Paste the app clipboard slightly offset, select the pasted items.
     pub fn paste_clipboard(&self) {
         let mut st = self.imp().state.borrow_mut();
-        if st.clipboard.is_empty() && st.clipboard_images.is_empty() {
+        if st.clipboard.is_empty() && st.clipboard_images.is_empty() && st.clipboard_texts.is_empty() {
             return;
         }
         let offset = 24.0 / st.zoom;
@@ -809,14 +1232,21 @@ impl CanvasView {
             c.y += offset;
             images.push(c);
         }
+        let texts: Vec<TextBox> = st
+            .clipboard_texts
+            .iter()
+            .map(|t| {
+                let mut c = t.clone();
+                c.id = TextId::new();
+                c.x += offset;
+                c.y += offset;
+                c
+            })
+            .collect();
         st.selection = pasted.iter().map(|s| s.id).collect();
         st.sel_images = images.iter().map(|i| i.id).collect();
-        st.session.dispatch(Command::Replace {
-            strokes_before: vec![],
-            strokes_after: pasted,
-            images_before: vec![],
-            images_after: images,
-        });
+        st.sel_texts = texts.iter().map(|t| t.id).collect();
+        Self::dispatch_combined(&mut st, vec![], pasted, vec![], images, vec![], texts);
         drop(st);
         self.queue_draw();
         self.notify_changed();
@@ -824,7 +1254,7 @@ impl CanvasView {
 
     pub fn clipboard_has_strokes(&self) -> bool {
         let st = self.imp().state.borrow();
-        !st.clipboard.is_empty() || !st.clipboard_images.is_empty()
+        !st.clipboard.is_empty() || !st.clipboard_images.is_empty() || !st.clipboard_texts.is_empty()
     }
 
     // ---- images ----
@@ -1055,6 +1485,7 @@ impl CanvasView {
         let mut st = self.imp().state.borrow_mut();
         st.selection.clear();
         st.sel_images.clear();
+        st.sel_texts.clear();
         st.sel_drag = None;
         st.sel_resize = None;
         st.marquee = None;
@@ -1065,17 +1496,22 @@ impl CanvasView {
 
     pub fn has_selection(&self) -> bool {
         let st = self.imp().state.borrow();
-        !st.selection.is_empty() || !st.sel_images.is_empty()
+        !st.selection.is_empty() || !st.sel_images.is_empty() || !st.sel_texts.is_empty()
     }
 
     /// Delete the current selection (ink + images) as one undoable command.
     pub fn delete_selection(&self) {
         let mut st = self.imp().state.borrow_mut();
-        if st.selection.is_empty() && st.sel_images.is_empty() {
+        if st.selection.is_empty() && st.sel_images.is_empty() && st.sel_texts.is_empty() {
             return;
         }
         let ids: Vec<StrokeId> = st.selection.drain().collect();
         let img_ids: Vec<ImageId> = st.sel_images.drain().collect();
+        let txt_ids: Vec<TextId> = st.sel_texts.drain().collect();
+        let removed_texts: Vec<TextBox> = txt_ids
+            .iter()
+            .filter_map(|id| st.session.content.text_index(*id).map(|i| st.session.content.texts[i].clone()))
+            .collect();
         let removed: Vec<Stroke> = ids
             .iter()
             .filter_map(|id| st.session.content.stroke_index(*id).map(|i| st.session.content.strokes[i].clone()))
@@ -1087,19 +1523,39 @@ impl CanvasView {
         for id in &ids {
             st.node_cache.remove(id);
         }
-        st.session.dispatch(Command::Replace {
-            strokes_before: removed,
-            strokes_after: vec![],
-            images_before: removed_images,
-            images_after: vec![],
-        });
+        Self::dispatch_combined(&mut st, removed, vec![], removed_images, vec![], removed_texts, vec![]);
         drop(st);
         self.queue_draw();
         self.notify_changed();
     }
 
+    /// Dispatch ink/image and text replacements as ONE undo step.
+    fn dispatch_combined(
+        st: &mut State,
+        strokes_before: Vec<Stroke>,
+        strokes_after: Vec<Stroke>,
+        images_before: Vec<ImageItem>,
+        images_after: Vec<ImageItem>,
+        texts_before: Vec<TextBox>,
+        texts_after: Vec<TextBox>,
+    ) {
+        let mut cmds = Vec::new();
+        if !(strokes_before.is_empty() && strokes_after.is_empty() && images_before.is_empty() && images_after.is_empty()) {
+            cmds.push(Command::Replace { strokes_before, strokes_after, images_before, images_after });
+        }
+        if !(texts_before.is_empty() && texts_after.is_empty()) {
+            cmds.push(Command::ReplaceTexts { before: texts_before, after: texts_after });
+        }
+        match cmds.len() {
+            0 => {}
+            1 => st.session.dispatch(cmds.pop().unwrap()),
+            _ => st.session.dispatch(Command::Batch(cmds)),
+        }
+    }
+
     /// Configure and activate the eraser.
     pub fn set_eraser(&self, kind: EraserKind, radius: f64) {
+        self.commit_text_edit();
         let mut st = self.imp().state.borrow_mut();
         st.active = ActiveTool::Eraser;
         st.eraser_kind = kind;
@@ -1264,6 +1720,38 @@ impl CanvasView {
             self.add_controller(click);
         }
 
+        // Double-click a text box in Select mode to edit it.
+        let dbl = gtk::GestureClick::new();
+        dbl.set_button(gdk::BUTTON_PRIMARY);
+        dbl.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = self.downgrade();
+        dbl.connect_pressed(move |_, n, x, y| {
+            if n != 2 {
+                return;
+            }
+            let Some(view) = weak.upgrade() else { return };
+            let hit = {
+                let mut st = view.imp().state.borrow_mut();
+                if st.active != ActiveTool::Select {
+                    return;
+                }
+                let (wx, wy) = Self::widget_to_world(&st, x, y);
+                let wp = kurbo::Point::new(wx, wy);
+                let hit = Self::text_at(&st, wp)
+                    .and_then(|id| st.session.content.text_index(id))
+                    .map(|i| (st.session.content.texts[i].clone(), wp));
+                if hit.is_some() {
+                    st.sel_drag = None;
+                    st.sel_offset = kurbo::Vec2::ZERO;
+                }
+                hit
+            };
+            if let Some((tb, wp)) = hit {
+                view.start_edit(Some(tb), wp, Some((x, y)));
+            }
+        });
+        self.add_controller(dbl);
+
         // Pen-friendly context menu: long-press an image in Select mode
         // (also reaches pinned images, so they can be unpinned).
         let long = gtk::GestureLongPress::new();
@@ -1366,6 +1854,9 @@ impl CanvasView {
     }
 
     fn stylus_begin(&self, g: &gtk::GestureStylus, x: f64, y: f64) {
+        if self.text_press(x, y) {
+            return;
+        }
         self.grab_focus();
         let state = g.current_event_state();
         // XP-Pen barrel buttons arrive as middle/secondary button masks (or an
@@ -1466,11 +1957,20 @@ impl CanvasView {
                     .filter(|(_, b)| b.is_some_and(|b| b.inflate(radius, radius).contains(wp)))
                     .find(|(s, _)| omascratch_ink::stroke_hit(&s.points, s.width, wp, radius))
                     .map(|(s, _)| s.id);
-                let image_hit = if stroke_hit.is_none() { Self::image_at(st, wp, false) } else { None };
+                let text_hit = if stroke_hit.is_none() { Self::text_at(st, wp) } else { None };
+                let image_hit = if stroke_hit.is_none() && text_hit.is_none() {
+                    Self::image_at(st, wp, false)
+                } else {
+                    None
+                };
                 if additive {
                     if let Some(id) = stroke_hit {
                         if !st.selection.remove(&id) {
                             st.selection.insert(id);
+                        }
+                    } else if let Some(id) = text_hit {
+                        if !st.sel_texts.remove(&id) {
+                            st.sel_texts.insert(id);
                         }
                     } else if let Some(id) = image_hit {
                         if !st.sel_images.remove(&id) {
@@ -1484,8 +1984,13 @@ impl CanvasView {
                 }
                 st.selection.clear();
                 st.sel_images.clear();
+                st.sel_texts.clear();
                 if let Some(id) = stroke_hit {
                     st.selection.insert(id);
+                    st.sel_drag = Some(wp);
+                    st.sel_offset = kurbo::Vec2::ZERO;
+                } else if let Some(id) = text_hit {
+                    st.sel_texts.insert(id);
                     st.sel_drag = Some(wp);
                     st.sel_offset = kurbo::Vec2::ZERO;
                 } else if let Some(img) = image_hit {
@@ -1503,6 +2008,8 @@ impl CanvasView {
             ActiveTool::Pan => {
                 st.panning = Some((x, y, st.offset));
             }
+            // Text clicks are handled before gestures start (text_press).
+            ActiveTool::Text => {}
         }
     }
 
@@ -1522,7 +2029,25 @@ impl CanvasView {
                 out = Some(out.map_or(b, |o| o.union(b)));
             }
         }
+        for t in &st.session.content.texts {
+            if st.sel_texts.contains(&t.id) {
+                let b = t.rect();
+                out = Some(out.map_or(b, |o| o.union(b)));
+            }
+        }
         out
+    }
+
+    /// Topmost text box under a world point (excluding the one being edited).
+    fn text_at(st: &State, wp: kurbo::Point) -> Option<TextId> {
+        let editing = st.editing.as_ref().map(|e| e.working.id);
+        st.session
+            .content
+            .texts
+            .iter()
+            .rev()
+            .find(|t| Some(t.id) != editing && t.rect().contains(wp))
+            .map(|t| t.id)
     }
 
     /// Decoded texture for an asset, loaded lazily from the note's asset dir.
@@ -1611,6 +2136,7 @@ impl CanvasView {
         st.bounds = st.session.content.strokes.iter().map(|s| s.bounds()).collect();
         let present: HashSet<StrokeId> = st.session.content.strokes.iter().map(|s| s.id).collect();
         st.node_cache.retain(|id, _| present.contains(id));
+        st.text_layouts.clear();
         st.bounds_rev = rev;
     }
 
@@ -1713,6 +2239,9 @@ impl CanvasView {
     }
 
     fn mouse_begin(&self, x: f64, y: f64) {
+        if self.text_press(x, y) {
+            return;
+        }
         self.grab_focus();
         let mut st = self.imp().state.borrow_mut();
         st.debug.tool_name = "Mouse".into();
@@ -1765,6 +2294,19 @@ impl CanvasView {
                 })
                 .map(|i| i.id)
                 .collect();
+            st.sel_texts = st
+                .session
+                .content
+                .texts
+                .iter()
+                .filter(|t| {
+                    let r = t.rect();
+                    [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)]
+                        .iter()
+                        .all(|(x, y)| omascratch_ink::point_in_polygon(kurbo::Point::new(*x, *y), &poly))
+                })
+                .map(|t| t.id)
+                .collect();
             drop(st);
             self.queue_draw();
             return;
@@ -1793,8 +2335,17 @@ impl CanvasView {
                     .filter(|i| !i.pinned && !i.rect().intersect(rect).is_zero_area())
                     .map(|i| i.id)
                     .collect();
+                let txt_hits: Vec<TextId> = st
+                    .session
+                    .content
+                    .texts
+                    .iter()
+                    .filter(|t| !t.rect().intersect(rect).is_zero_area())
+                    .map(|t| t.id)
+                    .collect();
                 st.selection.extend(hits);
                 st.sel_images.extend(img_hits);
+                st.sel_texts.extend(txt_hits);
             }
             drop(st);
             self.queue_draw();
@@ -1837,15 +2388,27 @@ impl CanvasView {
                         (i.clone(), a)
                     })
                     .unzip();
+                let (before_t, after_t): (Vec<TextBox>, Vec<TextBox>) = st
+                    .session
+                    .content
+                    .texts
+                    .iter()
+                    .filter(|t| st.sel_texts.contains(&t.id))
+                    .map(|t| {
+                        let mut a = t.clone();
+                        let tl = Self::scale_about(kurbo::Point::new(t.x, t.y), r.anchor, r.factor);
+                        a.x = tl.x;
+                        a.y = tl.y;
+                        a.w = t.w * r.factor;
+                        a.h = t.h * r.factor;
+                        a.font_size = (t.font_size * r.factor).max(4.0);
+                        (t.clone(), a)
+                    })
+                    .unzip();
                 for s in &before_s {
                     st.node_cache.remove(&s.id);
                 }
-                st.session.dispatch(Command::Replace {
-                    strokes_before: before_s,
-                    strokes_after: after_s,
-                    images_before: before_i,
-                    images_after: after_i,
-                });
+                Self::dispatch_combined(&mut st, before_s, after_s, before_i, after_i, before_t, after_t);
                 drop(st);
                 self.queue_draw();
                 self.notify_changed();
@@ -1859,7 +2422,9 @@ impl CanvasView {
         // Selection move finished: commit the accumulated offset.
         if st.sel_drag.take().is_some() {
             let offset = std::mem::replace(&mut st.sel_offset, kurbo::Vec2::ZERO);
-            if offset.hypot() >= 0.01 && (!st.selection.is_empty() || !st.sel_images.is_empty()) {
+            if offset.hypot() >= 0.01
+                && (!st.selection.is_empty() || !st.sel_images.is_empty() || !st.sel_texts.is_empty())
+            {
                 let (before_s, after_s): (Vec<Stroke>, Vec<Stroke>) = st
                     .session
                     .content
@@ -1888,15 +2453,23 @@ impl CanvasView {
                         (i.clone(), a)
                     })
                     .unzip();
+                let (before_t, after_t): (Vec<TextBox>, Vec<TextBox>) = st
+                    .session
+                    .content
+                    .texts
+                    .iter()
+                    .filter(|t| st.sel_texts.contains(&t.id))
+                    .map(|t| {
+                        let mut a = t.clone();
+                        a.x += offset.x;
+                        a.y += offset.y;
+                        (t.clone(), a)
+                    })
+                    .unzip();
                 for s in &before_s {
                     st.node_cache.remove(&s.id);
                 }
-                st.session.dispatch(Command::Replace {
-                    strokes_before: before_s,
-                    strokes_after: after_s,
-                    images_before: before_i,
-                    images_after: after_i,
-                });
+                Self::dispatch_combined(&mut st, before_s, after_s, before_i, after_i, before_t, after_t);
                 drop(st);
                 self.queue_draw();
                 self.notify_changed();
@@ -2108,6 +2681,36 @@ impl CanvasView {
             }
         }
 
+        // Text boxes: above images, below ink. The one being edited is drawn
+        // by the overlay editor instead. Selected boxes follow move/resize.
+        Self::ensure_bounds(&mut st);
+        let ctx = self.pango_context();
+        let editing_id = st.editing.as_ref().map(|e| e.working.id);
+        let texts: Vec<TextBox> = st.session.content.texts.clone();
+        for tb in &texts {
+            if Some(tb.id) == editing_id || tb.rect().intersect(visible.inflate(tb.w, tb.h)).is_zero_area() {
+                continue;
+            }
+            if !st.text_layouts.contains_key(&tb.id) {
+                let tl = textmod::layout_text(&ctx, tb);
+                st.text_layouts.insert(tb.id, tl);
+            }
+            let color = resolve_color_inv(tb.color, Tool::Pen, st.inverted, &st.palette);
+            let selected = st.sel_texts.contains(&tb.id);
+            snapshot.save();
+            if selected && st.sel_drag.is_some() {
+                snapshot.translate(&graphene::Point::new(st.sel_offset.x as f32, st.sel_offset.y as f32));
+            } else if let (true, Some(rz)) = (selected, st.sel_resize) {
+                snapshot.translate(&graphene::Point::new(rz.anchor.x as f32, rz.anchor.y as f32));
+                snapshot.scale(rz.factor as f32, rz.factor as f32);
+                snapshot.translate(&graphene::Point::new(-rz.anchor.x as f32, -rz.anchor.y as f32));
+            }
+            if let Some(tl) = st.text_layouts.get(&tb.id) {
+                textmod::draw_text(snapshot, &ctx, tl, tb.x, tb.y, tb.font_size, &color);
+            }
+            snapshot.restore();
+        }
+
         // Committed strokes: cached node per stroke, culled by bounds.
         let live_simulate = st.live.as_ref().map(|l| l.simulate_pressure);
         Self::ensure_bounds(&mut st);
@@ -2213,7 +2816,7 @@ impl CanvasView {
         }
 
         // Selection bounding box (dashed, constant on-screen width) + handles.
-        if (!st.selection.is_empty() || !st.sel_images.is_empty()) && !st.lassoing {
+        if (!st.selection.is_empty() || !st.sel_images.is_empty() || !st.sel_texts.is_empty()) && !st.lassoing {
             if let Some(mut b) = Self::selection_bounds(&st) {
                 if st.sel_drag.is_some() {
                     b = b + st.sel_offset;

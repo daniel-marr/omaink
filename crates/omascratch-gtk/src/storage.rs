@@ -123,6 +123,7 @@ impl Storage {
     /// Switch the open note: save the current one synchronously, then load the
     /// new file. Returns the new note's title for the breadcrumb.
     pub fn switch_to(self: &Rc<Self>, path: &Path, canvas: &CanvasView) -> String {
+        canvas.commit_text_edit();
         if *self.path.borrow() != path {
             let _ = self.save_final(canvas);
         }
@@ -230,6 +231,7 @@ impl Storage {
 
     /// Final synchronous save (close or note switch). Cancels pending timers.
     pub fn save_final(&self, canvas: &CanvasView) -> Result<(), store::StoreError> {
+        canvas.commit_text_edit();
         if let Some(id) = self.debounce.borrow_mut().take() {
             id.remove();
         }

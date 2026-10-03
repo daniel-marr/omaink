@@ -121,6 +121,7 @@ mod tests {
                     ],
                 }],
                 images: vec![],
+                texts: vec![],
             },
             opaque_elements: vec![],
         }
@@ -165,6 +166,39 @@ mod tests {
         ));
         // The file is untouched by the failed read.
         assert_eq!(std::fs::read(&p).unwrap(), bytes);
+    }
+
+    #[test]
+    fn text_boxes_round_trip() {
+        use omascratch_core::{ParaKind, Paragraph, Span, TextBox, TextId};
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("n.omanote");
+        let mut d = doc();
+        d.content.texts.push(TextBox {
+            id: TextId::new(),
+            x: 5.0,
+            y: 6.0,
+            w: 300.0,
+            h: 48.0,
+            font_size: 18.0,
+            color: SemanticColor::Foreground,
+            paras: vec![
+                Paragraph {
+                    kind: ParaKind::Check { checked: true },
+                    spans: vec![
+                        Span { text: "Buy ".into(), ..Default::default() },
+                        Span { text: "milk".into(), bold: true, highlight: true, ..Default::default() },
+                    ],
+                },
+                Paragraph { kind: ParaKind::Number, spans: vec![Span { text: "step".into(), italic: true, ..Default::default() }] },
+            ],
+        });
+        write_note(&p, &d, 9).unwrap();
+        let back = read_note(&p).unwrap();
+        assert_eq!(back.content.texts, d.content.texts);
+        assert!(back.opaque_elements.is_empty());
+        // Header-only read still works with text elements present.
+        assert_eq!(read_note_meta(&p).unwrap().title, "Test note");
     }
 
     #[test]

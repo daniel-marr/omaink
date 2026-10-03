@@ -107,8 +107,8 @@ impl Sidebar {
         notebook_label.set_hexpand(true);
         switcher.set_child(Some(&sw_box));
 
-        let help_btn = icon_button("help-browser-symbolic", "Keyboard shortcuts");
-        let gear_btn = icon_button("emblem-system-symbolic", "Settings");
+        let help_btn = glyph_button(help_glyph(), "Keyboard shortcuts");
+        let gear_btn = glyph_button(gear_glyph(), "Settings");
         nb_bar.append(&switcher);
         nb_bar.append(&help_btn);
         nb_bar.append(&gear_btn);
@@ -960,6 +960,77 @@ fn icon_button(icon: &str, tip: &str) -> gtk::Button {
     b.add_css_class("flat");
     b.set_tooltip_text(Some(tip));
     b
+}
+
+fn glyph_button(glyph: gtk::DrawingArea, tip: &str) -> gtk::Button {
+    let b = gtk::Button::new();
+    b.set_child(Some(&glyph));
+    b.add_css_class("flat");
+    b.set_tooltip_text(Some(tip));
+    b
+}
+
+/// 18px outline icon on Lucide's 24-unit grid, in the widget's text color
+/// (so it follows the theme like a symbolic icon).
+fn outline_glyph(draw: impl Fn(&gtk::cairo::Context) + 'static) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(18);
+    area.set_content_height(18);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(move |a, cr, w, h| {
+        let c = a.color();
+        cr.set_source_rgba(c.red() as f64, c.green() as f64, c.blue() as f64, c.alpha() as f64);
+        let k = (w.min(h) as f64) / 24.0;
+        cr.scale(k, k);
+        cr.set_line_width(2.0);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+        draw(cr);
+    });
+    area
+}
+
+/// Settings: a simplified gear — ring, eight short teeth, open center.
+fn gear_glyph() -> gtk::DrawingArea {
+    outline_glyph(|cr| {
+        use std::f64::consts::TAU;
+        cr.arc(12.0, 12.0, 6.5, 0.0, TAU);
+        let _ = cr.stroke();
+        cr.set_line_width(3.2);
+        cr.set_line_cap(gtk::cairo::LineCap::Butt);
+        for i in 0..8 {
+            let a = TAU * i as f64 / 8.0;
+            cr.move_to(12.0 + 7.0 * a.cos(), 12.0 + 7.0 * a.sin());
+            cr.line_to(12.0 + 10.0 * a.cos(), 12.0 + 10.0 * a.sin());
+        }
+        let _ = cr.stroke();
+        cr.set_line_width(2.0);
+        cr.arc(12.0, 12.0, 2.5, 0.0, TAU);
+        let _ = cr.stroke();
+    })
+}
+
+/// Help: a circle with a small question mark that clears the outline
+/// (Lucide `circle-help` proportions, mark scaled down).
+fn help_glyph() -> gtk::DrawingArea {
+    outline_glyph(|cr| {
+        use std::f64::consts::TAU;
+        cr.arc(12.0, 12.0, 10.0, 0.0, TAU);
+        let _ = cr.stroke();
+        let _ = cr.save();
+        cr.translate(12.0, 12.0);
+        cr.scale(0.8, 0.8);
+        cr.translate(-12.0, -12.0);
+        // Hook: arc over the top, then down into the stem.
+        cr.arc(12.0, 9.5, 2.9, 1.1 * std::f64::consts::PI, 2.25 * std::f64::consts::PI);
+        cr.curve_to(14.0, 11.6, 12.0, 12.0, 12.0, 14.0);
+        let _ = cr.restore();
+        let _ = cr.stroke();
+        // Dot, in the same scaled frame as the hook.
+        cr.arc(12.0, 16.4, 1.15, 0.0, TAU);
+        let _ = cr.fill();
+    })
 }
 
 fn flat_button(label: &str) -> gtk::Button {

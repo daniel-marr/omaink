@@ -1146,14 +1146,17 @@ mod tests {
                 let (a, d) = font_extents(&ed.view.pango_context(), font);
                 let black = gdk::RGBA::BLACK;
                 ed.restyle(font, cell, a + d, &black, &black);
-                for _ in 0..40 {
+                // Let the TextView re-lay out (idle-driven; slower under load).
+                let want: Vec<i32> = (0..5).map(|i| i * cell as i32).collect();
+                let line_tops = || -> Vec<i32> {
+                    (0..5).map(|l| ed.view.line_yrange(&ed.buffer.iter_at_line(l).unwrap()).0).collect()
+                };
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while line_tops() != want && std::time::Instant::now() < deadline {
                     glib::MainContext::default().iteration(false);
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-                let ys: Vec<i32> = (0..5)
-                    .map(|l| ed.view.line_yrange(&ed.buffer.iter_at_line(l).unwrap()).0)
-                    .collect();
-                let want: Vec<i32> = (0..5).map(|i| i * cell as i32).collect();
+                let ys = line_tops();
                 assert_eq!(ys, want, "font {font}: every line sits on the {cell}px rule pitch");
                 // List text starts at the page's list indent; body at 0.
                 let text_x = |l: i32| {

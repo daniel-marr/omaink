@@ -194,6 +194,8 @@ pub struct State {
     /// Style + color for new text (set from the text flyout with nothing
     /// selected or edited).
     text_defaults: textmod::StyleState,
+    /// List type new text boxes start with (picked with nothing to apply to).
+    text_list_default: Option<textmod::ListKind>,
     /// Shell hook: text editing state for the toolbar format group
     /// (None = not editing).
     on_text_state: Option<Box<dyn Fn(Option<textmod::StyleState>)>>,
@@ -269,6 +271,7 @@ impl Default for State {
             editing: None,
             text_font_size: textmod::DEFAULT_FONT_SIZE,
             text_defaults: textmod::StyleState::default(),
+            text_list_default: None,
             on_text_state: None,
             sel_resize: None,
             marquee: None,
@@ -742,7 +745,13 @@ impl CanvasView {
         let is_new = self.imp().state.borrow().editing.as_ref().is_some_and(|e| e.original.is_none());
         ed.load(&working);
         if is_new {
-            let defaults = self.imp().state.borrow().text_defaults;
+            let (defaults, list) = {
+                let st = self.imp().state.borrow();
+                (st.text_defaults, st.text_list_default)
+            };
+            if let Some(k) = list {
+                ed.toggle_list(k);
+            }
             ed.set_pending(defaults);
         }
         self.sync_editor_geometry(true);
@@ -1122,6 +1131,9 @@ impl CanvasView {
             return self.editor()?.current_list_kind();
         }
         let sel = self.selected_texts();
+        if sel.is_empty() {
+            return self.imp().state.borrow().text_list_default;
+        }
         // Blank lines don't count (a list usually ends with one).
         let mut kinds = sel.iter().flat_map(|t| {
             t.paras.iter().filter(|p| !p.plain_text().trim().is_empty()).map(|p| Self::para_list_kind(p.kind))
@@ -1137,6 +1149,10 @@ impl CanvasView {
             return;
         }
         let remove = self.text_list_kind() == Some(k);
+        if self.selected_texts().is_empty() {
+            self.imp().state.borrow_mut().text_list_default = if remove { None } else { Some(k) };
+            return;
+        }
         self.update_selected_texts(|t| {
             for p in t.paras.iter_mut().filter(|p| !p.plain_text().trim().is_empty()) {
                 p.kind = if remove {

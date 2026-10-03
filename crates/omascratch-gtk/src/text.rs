@@ -1051,4 +1051,21 @@ mod tests {
             assert_eq!(ed.to_paras()[0].plain_text(), "xitem");
         });
     }
+
+    #[test]
+    fn new_box_can_start_as_a_list() {
+        gtk::test_synced(|| {
+            if gtk::init().is_err() {
+                return;
+            }
+            let ed = TextEditor::new();
+            ed.load(&tb(vec![Paragraph { kind: ParaKind::Body, spans: vec![] }]));
+            ed.toggle_list(ListKind::Number);
+            assert_eq!(ed.current_list_kind(), Some(ListKind::Number));
+            let mut it = ed.buffer.iter_at_offset(ed.buffer.cursor_position());
+            ed.buffer.insert_interactive(&mut it, "milk", true);
+            let paras = ed.to_paras();
+            assert_eq!((paras[0].kind, paras[0].plain_text().as_str()), (ParaKind::Number, "milk"));
+        });
+    }
 }

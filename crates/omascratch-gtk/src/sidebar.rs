@@ -991,7 +991,7 @@ fn outline_glyph(draw: impl Fn(&gtk::cairo::Context) + 'static) -> gtk::DrawingA
     area
 }
 
-/// Settings: a simplified gear — ring, eight short teeth, open center.
+/// Settings: a simplified gear — a ring with eight short teeth.
 fn gear_glyph() -> gtk::DrawingArea {
     outline_glyph(|cr| {
         use std::f64::consts::TAU;
@@ -1004,9 +1004,6 @@ fn gear_glyph() -> gtk::DrawingArea {
             cr.move_to(12.0 + 7.0 * a.cos(), 12.0 + 7.0 * a.sin());
             cr.line_to(12.0 + 10.0 * a.cos(), 12.0 + 10.0 * a.sin());
         }
-        let _ = cr.stroke();
-        cr.set_line_width(2.0);
-        cr.arc(12.0, 12.0, 2.5, 0.0, TAU);
         let _ = cr.stroke();
     })
 }

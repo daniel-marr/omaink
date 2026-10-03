@@ -592,8 +592,39 @@ impl Toolbar {
         paste_btn.set_tooltip_text(Some("Paste (Ctrl+V)"));
         let c = canvas.clone();
         paste_btn.connect_clicked(move |_| c.paste());
+        let image_btn = gtk::Button::from_icon_name("insert-image-symbolic");
+        image_btn.add_css_class("flat");
+        image_btn.set_tooltip_text(Some("Insert image from file…"));
+        let c = canvas.clone();
+        image_btn.connect_clicked(move |b| {
+            let c = c.clone();
+            let win = b.root().and_downcast::<gtk::Window>();
+            glib::spawn_future_local(async move {
+                let filter = gtk::FileFilter::new();
+                filter.set_name(Some("Images"));
+                filter.add_mime_type("image/*");
+                for ext in ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "svg"] {
+                    filter.add_suffix(ext);
+                }
+                let filters = gtk4::gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&filter);
+                let dialog = gtk::FileDialog::new();
+                dialog.set_title("Insert image");
+                dialog.set_filters(Some(&filters));
+                dialog.set_default_filter(Some(&filter));
+                if let Ok(model) = dialog.open_multiple_future(win.as_ref()).await {
+                    let files: Vec<gtk4::gio::File> = (0..model.n_items())
+                        .filter_map(|i| model.item(i).and_downcast::<gtk4::gio::File>())
+                        .collect();
+                    if !files.is_empty() {
+                        c.insert_image_files(files, None);
+                    }
+                }
+            });
+        });
         tb.widget.append(&copy_btn);
         tb.widget.append(&paste_btn);
+        tb.widget.append(&image_btn);
         tb.widget.append(&vsep());
 
         // Gallery: eraser chip first, then pens.

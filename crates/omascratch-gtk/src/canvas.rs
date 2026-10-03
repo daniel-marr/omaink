@@ -178,8 +178,9 @@ pub struct State {
     /// Image assets: directory beside the open note + decoded texture cache.
     asset_dir: Option<PathBuf>,
     textures: HashMap<String, Option<gdk::Texture>>,
-    /// App-installed: persist image bytes beside the note, return asset name.
-    asset_writer: Option<Box<dyn Fn(&[u8]) -> Option<String>>>,
+    /// App-installed: persist image bytes (with file extension) beside the
+    /// note, return the asset name.
+    asset_writer: Option<Box<dyn Fn(&[u8], &str) -> Option<String>>>,
     /// App-installed: switch the toolbar to Select (after pasting an image).
     on_request_select: Option<Box<dyn Fn()>>,
     /// Images copied with a selection, and the asset dir they came from (so
@@ -837,7 +838,7 @@ impl CanvasView {
         self.queue_draw();
     }
 
-    pub fn set_asset_writer(&self, f: impl Fn(&[u8]) -> Option<String> + 'static) {
+    pub fn set_asset_writer(&self, f: impl Fn(&[u8], &str) -> Option<String> + 'static) {
         self.imp().state.borrow_mut().asset_writer = Some(Box::new(f));
     }
 
@@ -845,27 +846,78 @@ impl CanvasView {
         self.imp().state.borrow_mut().on_request_select = Some(Box::new(f));
     }
 
-    /// Save a pasted texture beside the note and drop it at the view center,
-    /// scaled to fit, selected and ready to move.
-    fn insert_image_texture(&self, tex: gdk::Texture) {
-        let bytes = tex.save_to_png_bytes();
+    fn write_asset(&self, bytes: &[u8], ext: &str) -> Option<String> {
         let writer = self.imp().state.borrow_mut().asset_writer.take();
-        let name = writer.as_ref().and_then(|w| w(&bytes));
+        let name = writer.as_ref().and_then(|w| w(bytes, ext));
         if let Some(w) = writer {
             self.imp().state.borrow_mut().asset_writer = Some(w);
         }
-        let Some(name) = name else {
+        name
+    }
+
+    /// Pasted texture (screenshots, browser copies): stored as PNG, placed at
+    /// the view center.
+    fn insert_image_texture(&self, tex: gdk::Texture) {
+        self.insert_texture_at(tex, None);
+    }
+
+    fn insert_texture_at(&self, tex: gdk::Texture, at_widget: Option<(f64, f64)>) {
+        let bytes = tex.save_to_png_bytes();
+        let Some(name) = self.write_asset(&bytes, "png") else {
             tracing::error!("could not save pasted image");
             return;
         };
+        self.place_image(tex, name, at_widget, false);
+    }
+
+    /// Image files (file picker or drag-and-drop): original bytes and format
+    /// are kept, so photos stay JPEG-sized. Multiple files stagger from the
+    /// drop point (or view center) and end up selected together.
+    pub fn insert_image_files(&self, files: Vec<gio::File>, at_widget: Option<(f64, f64)>) {
+        let view = self.clone();
+        glib::spawn_future_local(async move {
+            let mut placed = 0usize;
+            let mut skipped = 0usize;
+            for file in files {
+                let Ok((bytes, _)) = file.load_bytes_future().await else {
+                    skipped += 1;
+                    continue;
+                };
+                let Ok(tex) = gdk::Texture::from_bytes(&bytes) else {
+                    skipped += 1; // not an image this GTK can decode
+                    continue;
+                };
+                let ext = file
+                    .basename()
+                    .and_then(|b| b.extension().map(|e| e.to_string_lossy().to_lowercase()))
+                    .filter(|e| !e.is_empty() && e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+                    .unwrap_or_else(|| "img".to_string());
+                let Some(name) = view.write_asset(&bytes, &ext) else {
+                    skipped += 1;
+                    continue;
+                };
+                let stagger = 24.0 * placed as f64;
+                let at = at_widget.map(|(x, y)| (x + stagger, y + stagger));
+                view.place_image(tex, name, at, placed > 0);
+                placed += 1;
+            }
+            if skipped > 0 {
+                tracing::warn!("{skipped} dropped/selected file(s) were not readable images");
+            }
+        });
+    }
+
+    /// Add an image element centered on `at_widget` (or the view center),
+    /// scaled 1:1 on screen and capped to 60% of the viewport; select it
+    /// (optionally adding to the current selection) and switch to Select.
+    fn place_image(&self, tex: gdk::Texture, name: String, at_widget: Option<(f64, f64)>, add_to_selection: bool) {
         let (vw, vh) = (self.width().max(1) as f64, self.height().max(1) as f64);
         let mut st = self.imp().state.borrow_mut();
         let (pw, ph) = (tex.width().max(1) as f64, tex.height().max(1) as f64);
-        // 1:1 on screen at the current zoom, capped to 60% of the viewport.
         let fit = (0.6 * vw / pw).min(0.6 * vh / ph).min(1.0);
         let (w, h) = (pw * fit / st.zoom, ph * fit / st.zoom);
-        let cx = st.offset.x + vw / 2.0 / st.zoom;
-        let cy = st.offset.y + vh / 2.0 / st.zoom;
+        let (sx, sy) = at_widget.unwrap_or((vw / 2.0, vh / 2.0));
+        let (cx, cy) = Self::widget_to_world(&st, sx, sy);
         let item = ImageItem {
             id: ImageId::new(),
             asset: name.clone(),
@@ -876,8 +928,10 @@ impl CanvasView {
             pinned: false,
         };
         st.textures.insert(name, Some(tex));
-        st.selection.clear();
-        st.sel_images.clear();
+        if !add_to_selection {
+            st.selection.clear();
+            st.sel_images.clear();
+        }
         st.sel_images.insert(item.id);
         st.session.dispatch(Command::Replace {
             strokes_before: vec![],
@@ -1237,6 +1291,25 @@ impl CanvasView {
             }
         });
         self.add_controller(long);
+
+        // Drag-and-drop: image files from the file manager, or images dragged
+        // from other apps (as textures), land at the drop point.
+        let file_drop = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::COPY);
+        file_drop.set_types(&[gdk::FileList::static_type(), gdk::Texture::static_type()]);
+        let weak = self.downgrade();
+        file_drop.connect_drop(move |_, value, x, y| {
+            let Some(view) = weak.upgrade() else { return false };
+            if let Ok(list) = value.get::<gdk::FileList>() {
+                view.insert_image_files(list.files(), Some((x, y)));
+                return true;
+            }
+            if let Ok(tex) = value.get::<gdk::Texture>() {
+                view.insert_texture_at(tex, Some((x, y)));
+                return true;
+            }
+            false
+        });
+        self.add_controller(file_drop);
 
         // Scroll = pan; Ctrl+scroll = zoom around the pointer.
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);

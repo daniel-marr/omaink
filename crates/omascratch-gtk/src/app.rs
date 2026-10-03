@@ -53,7 +53,7 @@ fn build_window(app: &adw::Application) {
         // Pasted images: bytes saved beside the open note; afterwards the
         // toolbar switches to Select so the image can be moved right away.
         let st = storage.clone();
-        canvas.set_asset_writer(move |bytes| st.write_asset(bytes));
+        canvas.set_asset_writer(move |bytes, ext| st.write_asset(bytes, ext));
         let tb = draw_toolbar.clone();
         canvas.set_on_request_select(move || tb.select_tool());
     }

@@ -96,8 +96,8 @@ impl Storage {
     /// Persist pasted image bytes beside the open note; returns the asset
     /// name. Synchronous: it runs once per paste and must exist before the
     /// image element referencing it is saved.
-    pub fn write_asset(&self, bytes: &[u8]) -> Option<String> {
-        match store::write_asset(&self.path.borrow(), bytes, "png") {
+    pub fn write_asset(&self, bytes: &[u8], ext: &str) -> Option<String> {
+        match store::write_asset(&self.path.borrow(), bytes, ext) {
             Ok(name) => Some(name),
             Err(e) => {
                 tracing::error!("saving pasted image failed: {e}");

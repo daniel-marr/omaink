@@ -1120,7 +1120,10 @@ impl CanvasView {
             return self.editor()?.current_list_kind();
         }
         let sel = self.selected_texts();
-        let mut kinds = sel.iter().flat_map(|t| t.paras.iter().map(|p| Self::para_list_kind(p.kind)));
+        // Blank lines don't count (a list usually ends with one).
+        let mut kinds = sel.iter().flat_map(|t| {
+            t.paras.iter().filter(|p| !p.plain_text().trim().is_empty()).map(|p| Self::para_list_kind(p.kind))
+        });
         let first = kinds.next()??;
         kinds.all(|k| k == Some(first)).then_some(first)
     }
@@ -1134,7 +1137,7 @@ impl CanvasView {
         }
         let remove = self.text_list_kind() == Some(k);
         self.update_selected_texts(|t| {
-            for p in &mut t.paras {
+            for p in t.paras.iter_mut().filter(|p| !p.plain_text().trim().is_empty()) {
                 p.kind = if remove {
                     ParaKind::Body
                 } else {

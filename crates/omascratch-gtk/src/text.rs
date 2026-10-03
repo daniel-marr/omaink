@@ -363,13 +363,19 @@ impl TextEditor {
                 None
             });
         }
-        // Moving the cursor drops a pending (not yet typed) style.
+        // Moving the cursor drops a pending (not yet typed) style, and the
+        // cursor never rests before/inside a list marker (typing there would
+        // turn the marker into plain text).
         {
             let weak = std::rc::Rc::downgrade(&ed);
             ed.buffer.connect_mark_set(move |_, _, mark| {
                 if let Some(ed) = weak.upgrade() {
-                    if mark.name().as_deref() == Some("insert") && !ed.internal.get() {
+                    let name = mark.name();
+                    if name.as_deref() == Some("insert") && !ed.internal.get() {
                         ed.pending.set(None);
+                    }
+                    if matches!(name.as_deref(), Some("insert") | Some("selection_bound")) {
+                        ed.clamp_cursor();
                     }
                 }
             });
@@ -617,6 +623,7 @@ impl TextEditor {
         let start = self.buffer.start_iter();
         self.buffer.place_cursor(&start);
         self.internal.set(false);
+        self.clamp_cursor();
         self.pending.set(None);
     }
 
@@ -752,13 +759,31 @@ impl TextEditor {
         self.internal.set(was);
     }
 
+    /// Move a collapsed cursor that sits before or inside a marker to just
+    /// after it. Selections are left alone.
+    fn clamp_cursor(&self) {
+        if self.buffer.selection_bounds().is_some() {
+            return;
+        }
+        let it = self.buffer.iter_at_offset(self.buffer.cursor_position());
+        if !it.has_tag(&self.marker) {
+            return;
+        }
+        if let Some((_, mend)) = self.line_marker(it.line()) {
+            if mend.offset() != it.offset() {
+                self.buffer.place_cursor(&mend);
+            }
+        }
+    }
+
     fn cursor_line(&self) -> i32 {
         self.buffer.iter_at_offset(self.buffer.cursor_position()).line()
     }
 
     fn selected_lines(&self) -> (i32, i32) {
         match self.buffer.selection_bounds() {
-            Some((s, e)) => (s.line(), e.line()),
+            // A selection ending at a line start doesn't include that line.
+            Some((s, e)) => (s.line(), if e.starts_line() && e.line() > s.line() { e.line() - 1 } else { e.line() }),
             None => {
                 let l = self.cursor_line();
                 (l, l)
@@ -794,6 +819,7 @@ impl TextEditor {
             self.set_line_kind(l, if all { ParaKind::Body } else { target });
         }
         self.retag_lists();
+        self.clamp_cursor();
     }
 
     /// Ctrl+1 (OneNote to-do): none → unchecked → checked → unchecked …
@@ -805,6 +831,7 @@ impl TextEditor {
         };
         self.set_line_kind(l, next);
         self.retag_lists();
+        self.clamp_cursor();
     }
 
     /// Return inside a list: continue it, or end it on an empty item.
@@ -995,6 +1022,33 @@ mod tests {
             ed.buffer.insert(&mut it, "!");
             let last = ed.to_paras()[0].spans.last().unwrap().clone();
             assert_eq!((last.text.as_str(), last.color), ("!", Some(SemanticColor::Accent)));
+        });
+    }
+
+    #[test]
+    fn cursor_never_rests_before_a_list_marker() {
+        gtk::test_synced(|| {
+            if gtk::init().is_err() {
+                return;
+            }
+            let ed = TextEditor::new();
+            ed.load(&tb(vec![Paragraph { kind: ParaKind::Bullet, spans: vec![span("item", false, false)] }]));
+            // load() puts the cursor at the very start, i.e. before "• ".
+            let mut it = ed.buffer.iter_at_offset(ed.buffer.cursor_position());
+            ed.buffer.insert_interactive(&mut it, "x", true);
+            let paras = ed.to_paras();
+            assert_eq!(paras[0].kind, ParaKind::Bullet, "{paras:?}");
+            assert_eq!(paras[0].plain_text(), "xitem");
+            assert_eq!(ed.current_list_kind(), Some(ListKind::Bullet));
+            // Switching kinds keeps one marker.
+            ed.toggle_list(ListKind::Number);
+            assert_eq!(ed.to_paras()[0].kind, ParaKind::Number);
+            assert_eq!(ed.to_paras()[0].plain_text(), "xitem");
+            ed.toggle_list(ListKind::Check);
+            assert_eq!(ed.to_paras()[0].kind, ParaKind::Check { checked: false });
+            ed.toggle_list(ListKind::Check);
+            assert_eq!(ed.to_paras()[0].kind, ParaKind::Body);
+            assert_eq!(ed.to_paras()[0].plain_text(), "xitem");
         });
     }
 }

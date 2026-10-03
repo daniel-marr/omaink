@@ -32,6 +32,7 @@ macro_rules! id_type {
 id_type!(NotebookId);
 id_type!(FolderId);
 id_type!(NoteId);
+id_type!(ImageId);
 
 #[cfg(test)]
 mod tests {

@@ -10,10 +10,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Instant, SystemTime};
 
 use gtk4 as gtk;
-use gtk4::{gdk, glib, graphene, gsk, prelude::*, subclass::prelude::*};
+use gtk4::{gdk, gio, glib, graphene, gsk, prelude::*, subclass::prelude::*};
 use kurbo::PathEl;
 
-use omascratch_core::{BackgroundKind, Command, InkPoint, NoteSession, PageBackground, Rgba, SemanticColor, Stroke, StrokeId, Tool};
+use omascratch_core::{
+    BackgroundKind, Command, ImageId, ImageItem, InkPoint, NoteSession, PageBackground, Rgba,
+    SemanticColor, Stroke, StrokeId, Tool,
+};
+use std::path::PathBuf;
 
 // M1 fixed palette (Tokyo Night-ish). Replaced by the Omarchy theme adapter in M5.
 const BG: gdk::RGBA = gdk::RGBA::new(0.102, 0.106, 0.149, 1.0);
@@ -107,6 +111,15 @@ fn tool_to_active(tool: Tool) -> ActiveTool {
     }
 }
 
+/// An in-progress corner-handle resize: proportional scale about `anchor`
+/// (the opposite corner) by `factor`.
+#[derive(Clone, Copy)]
+struct ResizeDrag {
+    anchor: kurbo::Point,
+    start: kurbo::Point,
+    factor: f64,
+}
+
 struct LiveStroke {
     tool: Tool,
     color: SemanticColor,
@@ -158,6 +171,21 @@ pub struct State {
     erase_path: Vec<kurbo::Point>,
     /// Current selection + in-progress selection gestures.
     selection: HashSet<StrokeId>,
+    sel_images: HashSet<ImageId>,
+    sel_resize: Option<ResizeDrag>,
+    /// Select tool rubber-band rectangle: (start, current) in world units.
+    marquee: Option<(kurbo::Point, kurbo::Point)>,
+    /// Image assets: directory beside the open note + decoded texture cache.
+    asset_dir: Option<PathBuf>,
+    textures: HashMap<String, Option<gdk::Texture>>,
+    /// App-installed: persist image bytes beside the note, return asset name.
+    asset_writer: Option<Box<dyn Fn(&[u8]) -> Option<String>>>,
+    /// App-installed: switch the toolbar to Select (after pasting an image).
+    on_request_select: Option<Box<dyn Fn()>>,
+    /// Images copied with a selection, and the asset dir they came from (so
+    /// pasting into another note can bring the image file along).
+    clipboard_images: Vec<ImageItem>,
+    clipboard_asset_dir: Option<PathBuf>,
     lassoing: bool,
     lasso_path: Vec<kurbo::Point>,
     /// While dragging a selection: last world point + accumulated offset.
@@ -201,6 +229,15 @@ impl Default for State {
             live_erased: HashSet::new(),
             erase_path: Vec::new(),
             selection: HashSet::new(),
+            sel_images: HashSet::new(),
+            sel_resize: None,
+            marquee: None,
+            asset_dir: None,
+            textures: HashMap::new(),
+            asset_writer: None,
+            on_request_select: None,
+            clipboard_images: Vec::new(),
+            clipboard_asset_dir: None,
             lassoing: false,
             lasso_path: Vec::new(),
             sel_drag: None,
@@ -413,6 +450,9 @@ impl CanvasView {
         st.erasing = false;
         st.live_erased.clear();
         st.selection.clear();
+        st.sel_images.clear();
+        st.sel_resize = None;
+        st.marquee = None;
         st.lassoing = false;
         st.lasso_path.clear();
         st.sel_drag = None;
@@ -565,10 +605,12 @@ impl CanvasView {
         st.cur_width = width;
     }
 
-    /// Copy the selection into the app clipboard. Returns stroke count.
+    /// Copy the selection (ink + images) into the app clipboard. Also puts a
+    /// text marker on the system clipboard so a stale screenshot there can't
+    /// hijack the next paste. Returns the number of items copied.
     pub fn copy_selection(&self) -> usize {
         let mut st = self.imp().state.borrow_mut();
-        let copied: Vec<Stroke> = st
+        let strokes: Vec<Stroke> = st
             .session
             .content
             .strokes
@@ -576,9 +618,21 @@ impl CanvasView {
             .filter(|s| st.selection.contains(&s.id))
             .cloned()
             .collect();
-        let n = copied.len();
+        let images: Vec<ImageItem> = st
+            .session
+            .content
+            .images
+            .iter()
+            .filter(|i| st.sel_images.contains(&i.id))
+            .cloned()
+            .collect();
+        let n = strokes.len() + images.len();
         if n > 0 {
-            st.clipboard = copied;
+            st.clipboard = strokes;
+            st.clipboard_images = images;
+            st.clipboard_asset_dir = st.asset_dir.clone();
+            drop(st);
+            self.clipboard().set_text("OmaScratch selection");
         }
         n
     }
@@ -589,10 +643,35 @@ impl CanvasView {
         }
     }
 
-    /// Paste the app clipboard slightly offset, select the pasted strokes.
+    /// Paste: an image on the system clipboard wins (screenshots, browser
+    /// copies); otherwise the app's copied ink/images.
+    pub fn paste(&self) {
+        let clip = self.clipboard();
+        let formats = clip.formats();
+        let has_image = formats.contains_type(gdk::Texture::static_type())
+            || formats.mime_types().iter().any(|m| m.starts_with("image/"));
+        if has_image {
+            let weak = self.downgrade();
+            clip.read_texture_async(gio::Cancellable::NONE, move |res| {
+                let Some(view) = weak.upgrade() else { return };
+                match res {
+                    Ok(Some(tex)) => view.insert_image_texture(tex),
+                    Ok(None) => view.paste_clipboard(),
+                    Err(e) => {
+                        tracing::warn!("clipboard image read failed: {e}");
+                        view.paste_clipboard();
+                    }
+                }
+            });
+        } else {
+            self.paste_clipboard();
+        }
+    }
+
+    /// Paste the app clipboard slightly offset, select the pasted items.
     pub fn paste_clipboard(&self) {
         let mut st = self.imp().state.borrow_mut();
-        if st.clipboard.is_empty() {
+        if st.clipboard.is_empty() && st.clipboard_images.is_empty() {
             return;
         }
         let offset = 24.0 / st.zoom;
@@ -609,47 +688,255 @@ impl CanvasView {
                 c
             })
             .collect();
+        // Images keep their asset; bring the file along if it lives in
+        // another note's asset dir.
+        let mut images: Vec<ImageItem> = Vec::new();
+        for img in st.clipboard_images.clone() {
+            if let (Some(src), Some(dst)) = (st.clipboard_asset_dir.clone(), st.asset_dir.clone()) {
+                if src != dst && !dst.join(&img.asset).exists() {
+                    let _ = std::fs::create_dir_all(&dst);
+                    if std::fs::copy(src.join(&img.asset), dst.join(&img.asset)).is_err() {
+                        continue;
+                    }
+                }
+            }
+            let mut c = img.clone();
+            c.id = ImageId::new();
+            c.x += offset;
+            c.y += offset;
+            images.push(c);
+        }
         st.selection = pasted.iter().map(|s| s.id).collect();
-        st.session.dispatch(Command::AddStrokes(pasted));
+        st.sel_images = images.iter().map(|i| i.id).collect();
+        st.session.dispatch(Command::Replace {
+            strokes_before: vec![],
+            strokes_after: pasted,
+            images_before: vec![],
+            images_after: images,
+        });
         drop(st);
         self.queue_draw();
         self.notify_changed();
     }
 
     pub fn clipboard_has_strokes(&self) -> bool {
-        !self.imp().state.borrow().clipboard.is_empty()
+        let st = self.imp().state.borrow();
+        !st.clipboard.is_empty() || !st.clipboard_images.is_empty()
+    }
+
+    // ---- images ----
+
+    /// Where the open note's image assets live (set when a note opens).
+    pub fn set_asset_dir(&self, dir: PathBuf) {
+        let mut st = self.imp().state.borrow_mut();
+        st.asset_dir = Some(dir);
+        st.textures.clear();
+        drop(st);
+        self.queue_draw();
+    }
+
+    pub fn set_asset_writer(&self, f: impl Fn(&[u8]) -> Option<String> + 'static) {
+        self.imp().state.borrow_mut().asset_writer = Some(Box::new(f));
+    }
+
+    pub fn set_on_request_select(&self, f: impl Fn() + 'static) {
+        self.imp().state.borrow_mut().on_request_select = Some(Box::new(f));
+    }
+
+    /// Save a pasted texture beside the note and drop it at the view center,
+    /// scaled to fit, selected and ready to move.
+    fn insert_image_texture(&self, tex: gdk::Texture) {
+        let bytes = tex.save_to_png_bytes();
+        let writer = self.imp().state.borrow_mut().asset_writer.take();
+        let name = writer.as_ref().and_then(|w| w(&bytes));
+        if let Some(w) = writer {
+            self.imp().state.borrow_mut().asset_writer = Some(w);
+        }
+        let Some(name) = name else {
+            tracing::error!("could not save pasted image");
+            return;
+        };
+        let (vw, vh) = (self.width().max(1) as f64, self.height().max(1) as f64);
+        let mut st = self.imp().state.borrow_mut();
+        let (pw, ph) = (tex.width().max(1) as f64, tex.height().max(1) as f64);
+        // 1:1 on screen at the current zoom, capped to 60% of the viewport.
+        let fit = (0.6 * vw / pw).min(0.6 * vh / ph).min(1.0);
+        let (w, h) = (pw * fit / st.zoom, ph * fit / st.zoom);
+        let cx = st.offset.x + vw / 2.0 / st.zoom;
+        let cy = st.offset.y + vh / 2.0 / st.zoom;
+        let item = ImageItem {
+            id: ImageId::new(),
+            asset: name.clone(),
+            x: cx - w / 2.0,
+            y: cy - h / 2.0,
+            w,
+            h,
+            pinned: false,
+        };
+        st.textures.insert(name, Some(tex));
+        st.selection.clear();
+        st.sel_images.clear();
+        st.sel_images.insert(item.id);
+        st.session.dispatch(Command::Replace {
+            strokes_before: vec![],
+            strokes_after: vec![],
+            images_before: vec![],
+            images_after: vec![item],
+        });
+        let request = st.on_request_select.take();
+        drop(st);
+        if let Some(r) = request {
+            r();
+            self.imp().state.borrow_mut().on_request_select = Some(r);
+        }
+        self.queue_draw();
+        self.notify_changed();
+    }
+
+    /// Topmost image under a world point; pinned images only if asked.
+    fn image_at(st: &State, wp: kurbo::Point, include_pinned: bool) -> Option<ImageId> {
+        st.session
+            .content
+            .images
+            .iter()
+            .rev()
+            .find(|i| (include_pinned || !i.pinned) && i.rect().contains(wp))
+            .map(|i| i.id)
+    }
+
+    fn set_image_pinned(&self, id: ImageId, pinned: bool) {
+        let mut st = self.imp().state.borrow_mut();
+        let Some(idx) = st.session.content.image_index(id) else { return };
+        let before = st.session.content.images[idx].clone();
+        if before.pinned == pinned {
+            return;
+        }
+        let mut after = before.clone();
+        after.pinned = pinned;
+        if pinned {
+            st.sel_images.remove(&id);
+        }
+        st.session.dispatch(Command::Replace {
+            strokes_before: vec![],
+            strokes_after: vec![],
+            images_before: vec![before],
+            images_after: vec![after],
+        });
+        drop(st);
+        self.queue_draw();
+        self.notify_changed();
+    }
+
+    fn delete_image(&self, id: ImageId) {
+        let mut st = self.imp().state.borrow_mut();
+        let Some(idx) = st.session.content.image_index(id) else { return };
+        let before = st.session.content.images[idx].clone();
+        st.sel_images.remove(&id);
+        st.session.dispatch(Command::Replace {
+            strokes_before: vec![],
+            strokes_after: vec![],
+            images_before: vec![before],
+            images_after: vec![],
+        });
+        drop(st);
+        self.queue_draw();
+        self.notify_changed();
+    }
+
+    /// Context menu for an image (right-click, or long-press in Select).
+    fn show_image_menu(&self, x: f64, y: f64, id: ImageId) {
+        let pinned = {
+            let st = self.imp().state.borrow();
+            match st.session.content.image_index(id) {
+                Some(i) => st.session.content.images[i].pinned,
+                None => return,
+            }
+        };
+        let popover = gtk::Popover::new();
+        popover.set_parent(self);
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        popover.set_has_arrow(false);
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        vbox.set_margin_top(4);
+        vbox.set_margin_bottom(4);
+        vbox.set_margin_start(4);
+        vbox.set_margin_end(4);
+        let pin = gtk::Button::with_label(if pinned { "Unpin from background" } else { "Pin to background" });
+        let del = gtk::Button::with_label("Delete image");
+        for b in [&pin, &del] {
+            b.add_css_class("flat");
+            if let Some(l) = b.child().and_downcast::<gtk::Label>() {
+                l.set_xalign(0.0);
+            }
+        }
+        del.add_css_class("destructive-action");
+        vbox.append(&pin);
+        vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        vbox.append(&del);
+        popover.set_child(Some(&vbox));
+
+        let view = self.clone();
+        let pop = popover.clone();
+        pin.connect_clicked(move |_| {
+            pop.popdown();
+            view.set_image_pinned(id, !pinned);
+        });
+        let view = self.clone();
+        let pop = popover.clone();
+        del.connect_clicked(move |_| {
+            pop.popdown();
+            view.delete_image(id);
+        });
+        // Unparent once closed (deferred: never inside the popover's own signal).
+        popover.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        popover.popup();
     }
 
     pub fn clear_selection(&self) {
         let mut st = self.imp().state.borrow_mut();
         st.selection.clear();
+        st.sel_images.clear();
         st.sel_drag = None;
+        st.sel_resize = None;
+        st.marquee = None;
         st.sel_offset = kurbo::Vec2::ZERO;
         drop(st);
         self.queue_draw();
     }
 
     pub fn has_selection(&self) -> bool {
-        !self.imp().state.borrow().selection.is_empty()
+        let st = self.imp().state.borrow();
+        !st.selection.is_empty() || !st.sel_images.is_empty()
     }
 
-    /// Delete the current selection as one undoable command.
+    /// Delete the current selection (ink + images) as one undoable command.
     pub fn delete_selection(&self) {
         let mut st = self.imp().state.borrow_mut();
-        if st.selection.is_empty() {
+        if st.selection.is_empty() && st.sel_images.is_empty() {
             return;
         }
         let ids: Vec<StrokeId> = st.selection.drain().collect();
+        let img_ids: Vec<ImageId> = st.sel_images.drain().collect();
         let removed: Vec<Stroke> = ids
             .iter()
             .filter_map(|id| st.session.content.stroke_index(*id).map(|i| st.session.content.strokes[i].clone()))
             .collect();
+        let removed_images: Vec<ImageItem> = img_ids
+            .iter()
+            .filter_map(|id| st.session.content.image_index(*id).map(|i| st.session.content.images[i].clone()))
+            .collect();
         for id in &ids {
             st.node_cache.remove(id);
         }
-        if !removed.is_empty() {
-            st.session.dispatch(Command::EraseStrokes { removed, replacements: vec![] });
-        }
+        st.session.dispatch(Command::Replace {
+            strokes_before: removed,
+            strokes_after: vec![],
+            images_before: removed_images,
+            images_after: vec![],
+        });
         drop(st);
         self.queue_draw();
         self.notify_changed();
@@ -733,6 +1020,8 @@ impl CanvasView {
             if g.current_event().and_then(|ev| ev.device_tool()).is_some() {
                 return;
             }
+            view.imp().state.borrow_mut().shift_down =
+                g.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
             view.mouse_begin(x, y);
         });
         let weak = self.downgrade();
@@ -796,15 +1085,56 @@ impl CanvasView {
             click.set_button(button);
             click.set_propagation_phase(gtk::PropagationPhase::Capture);
             let weak = self.downgrade();
-            click.connect_pressed(move |g, _, _, _| {
+            click.connect_pressed(move |g, _, x, y| {
                 let Some(view) = weak.upgrade() else { return };
                 if g.current_event().and_then(|ev| ev.device_tool()).is_some() {
                     g.set_state(gtk::EventSequenceState::Claimed);
                     view.fire_eraser_toggle();
+                    return;
+                }
+                // Mouse right-click on an image: its context menu.
+                if g.current_button() == gdk::BUTTON_SECONDARY {
+                    let hit = {
+                        let st = view.imp().state.borrow();
+                        let (wx, wy) = Self::widget_to_world(&st, x, y);
+                        Self::image_at(&st, kurbo::Point::new(wx, wy), true)
+                    };
+                    if let Some(id) = hit {
+                        g.set_state(gtk::EventSequenceState::Claimed);
+                        view.show_image_menu(x, y, id);
+                    }
                 }
             });
             self.add_controller(click);
         }
+
+        // Pen-friendly context menu: long-press an image in Select mode
+        // (also reaches pinned images, so they can be unpinned).
+        let long = gtk::GestureLongPress::new();
+        let weak = self.downgrade();
+        long.connect_pressed(move |_, x, y| {
+            let Some(view) = weak.upgrade() else { return };
+            let hit = {
+                let mut st = view.imp().state.borrow_mut();
+                if st.active != ActiveTool::Select {
+                    return;
+                }
+                let (wx, wy) = Self::widget_to_world(&st, x, y);
+                let hit = Self::image_at(&st, kurbo::Point::new(wx, wy), true);
+                if hit.is_some() {
+                    // Cancel the drag the press started; the menu takes over.
+                    st.sel_drag = None;
+                    st.sel_resize = None;
+                    st.sel_offset = kurbo::Vec2::ZERO;
+                }
+                hit
+            };
+            if let Some(id) = hit {
+                view.show_image_menu(x, y, id);
+                view.queue_draw();
+            }
+        });
+        self.add_controller(long);
 
         // Scroll = pan; Ctrl+scroll = zoom around the pointer.
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
@@ -887,6 +1217,7 @@ impl CanvasView {
             gdk::ModifierType::BUTTON2_MASK | gdk::ModifierType::BUTTON3_MASK,
         );
         let mut st = self.imp().state.borrow_mut();
+        st.shift_down = state.contains(gdk::ModifierType::SHIFT_MASK);
         let mut force_erase = barrel;
         if let Some(t) = g.device_tool() {
             st.debug.tool_name = format!("{:?}", t.tool_type());
@@ -939,7 +1270,9 @@ impl CanvasView {
                 st.erase_path.clear();
             }
             ActiveTool::Lasso => {
-                if Self::selection_bounds(st).is_some_and(|b| b.contains(wp)) {
+                if let Some((anchor, start)) = Self::handle_hit(st, wp) {
+                    st.sel_resize = Some(ResizeDrag { anchor, start, factor: 1.0 });
+                } else if Self::selection_bounds(st).is_some_and(|b| b.contains(wp)) {
                     // Drag inside the selection moves it.
                     st.sel_drag = Some(wp);
                     st.sel_offset = kurbo::Vec2::ZERO;
@@ -950,26 +1283,58 @@ impl CanvasView {
                 }
             }
             ActiveTool::Select => {
-                if Self::selection_bounds(st).is_some_and(|b| b.contains(wp)) {
+                let additive = st.shift_down;
+                if !additive {
+                    if let Some((anchor, start)) = Self::handle_hit(st, wp) {
+                        st.sel_resize = Some(ResizeDrag { anchor, start, factor: 1.0 });
+                        return;
+                    }
+                    if Self::selection_bounds(st).is_some_and(|b| b.contains(wp)) {
+                        st.sel_drag = Some(wp);
+                        st.sel_offset = kurbo::Vec2::ZERO;
+                        return;
+                    }
+                }
+                // Click an object to select it (Shift toggles it in/out of
+                // the selection); a plain click also allows dragging at once.
+                let radius = 6.0 / st.zoom;
+                let stroke_hit = st
+                    .session
+                    .content
+                    .strokes
+                    .iter()
+                    .rev()
+                    .find(|s| omascratch_ink::stroke_hit(&s.points, s.width, wp, radius))
+                    .map(|s| s.id);
+                let image_hit = if stroke_hit.is_none() { Self::image_at(st, wp, false) } else { None };
+                if additive {
+                    if let Some(id) = stroke_hit {
+                        if !st.selection.remove(&id) {
+                            st.selection.insert(id);
+                        }
+                    } else if let Some(id) = image_hit {
+                        if !st.sel_images.remove(&id) {
+                            st.sel_images.insert(id);
+                        }
+                    } else {
+                        // Shift-drag on empty canvas: add a rectangle.
+                        st.marquee = Some((wp, wp));
+                    }
+                    return;
+                }
+                st.selection.clear();
+                st.sel_images.clear();
+                if let Some(id) = stroke_hit {
+                    st.selection.insert(id);
+                    st.sel_drag = Some(wp);
+                    st.sel_offset = kurbo::Vec2::ZERO;
+                } else if let Some(img) = image_hit {
+                    st.sel_images.insert(img);
                     st.sel_drag = Some(wp);
                     st.sel_offset = kurbo::Vec2::ZERO;
                 } else {
-                    // Click a stroke to select it (and immediately allow dragging).
-                    let radius = 6.0 / st.zoom;
-                    let hit = st
-                        .session
-                        .content
-                        .strokes
-                        .iter()
-                        .rev()
-                        .find(|s| omascratch_ink::stroke_hit(&s.points, s.width, wp, radius))
-                        .map(|s| s.id);
-                    st.selection.clear();
-                    if let Some(id) = hit {
-                        st.selection.insert(id);
-                        st.sel_drag = Some(wp);
-                        st.sel_offset = kurbo::Vec2::ZERO;
-                    }
+                    // Empty canvas: start a rubber-band selection rectangle.
+                    st.marquee = Some((wp, wp));
                 }
             }
             ActiveTool::Shape => {
@@ -981,7 +1346,7 @@ impl CanvasView {
         }
     }
 
-    /// Union bounds of the selected strokes (without any drag offset).
+    /// Union bounds of the selected strokes and images (no drag offset).
     fn selection_bounds(st: &State) -> Option<kurbo::Rect> {
         let mut out: Option<kurbo::Rect> = None;
         for s in &st.session.content.strokes {
@@ -991,7 +1356,47 @@ impl CanvasView {
                 }
             }
         }
+        for i in &st.session.content.images {
+            if st.sel_images.contains(&i.id) {
+                let b = i.rect();
+                out = Some(out.map_or(b, |o| o.union(b)));
+            }
+        }
         out
+    }
+
+    /// Decoded texture for an asset, loaded lazily from the note's asset dir.
+    fn texture_for(st: &mut State, asset: &str) -> Option<gdk::Texture> {
+        if let Some(t) = st.textures.get(asset) {
+            return t.clone();
+        }
+        let tex = st
+            .asset_dir
+            .as_ref()
+            .and_then(|d| gdk::Texture::from_filename(d.join(asset)).ok());
+        st.textures.insert(asset.to_string(), tex.clone());
+        tex
+    }
+
+    /// Corner handle under `wp`: returns (anchor = opposite corner, corner).
+    fn handle_hit(st: &State, wp: kurbo::Point) -> Option<(kurbo::Point, kurbo::Point)> {
+        let b = Self::selection_bounds(st)?;
+        let r = 10.0 / st.zoom;
+        let corners = [
+            (kurbo::Point::new(b.x0, b.y0), kurbo::Point::new(b.x1, b.y1)),
+            (kurbo::Point::new(b.x1, b.y0), kurbo::Point::new(b.x0, b.y1)),
+            (kurbo::Point::new(b.x1, b.y1), kurbo::Point::new(b.x0, b.y0)),
+            (kurbo::Point::new(b.x0, b.y1), kurbo::Point::new(b.x1, b.y0)),
+        ];
+        corners
+            .into_iter()
+            .find(|(c, _)| (*c - wp).hypot() <= r)
+            .map(|(c, anchor)| (anchor, c))
+    }
+
+    /// Proportional scale of a point about an anchor.
+    fn scale_about(p: kurbo::Point, anchor: kurbo::Point, f: f64) -> kurbo::Point {
+        anchor + (p - anchor) * f
     }
 
     fn stylus_motion(&self, g: &gtk::GestureStylus, x: f64, y: f64) {
@@ -1001,6 +1406,8 @@ impl CanvasView {
                 || st.erasing
                 || st.lassoing
                 || st.sel_drag.is_some()
+                || st.sel_resize.is_some()
+                || st.marquee.is_some()
                 || st.shape_drag.is_some()
                 || st.panning.is_some();
             if !gesture_active {
@@ -1084,6 +1491,18 @@ impl CanvasView {
             }
             return;
         }
+        if let Some((_, cur)) = st.marquee.as_mut() {
+            *cur = wp;
+            return;
+        }
+        if let Some(mut r) = st.sel_resize {
+            // Project the pointer onto the anchor→corner diagonal.
+            let d0 = r.start - r.anchor;
+            let len2 = d0.hypot2().max(1e-9);
+            r.factor = ((wp - r.anchor).dot(d0) / len2).max(0.05);
+            st.sel_resize = Some(r);
+            return;
+        }
         if let Some(last) = st.sel_drag {
             st.sel_offset += wp - last;
             st.sel_drag = Some(wp);
@@ -1151,6 +1570,107 @@ impl CanvasView {
                 .filter(|s| omascratch_ink::stroke_inside_polygon(&s.points, &poly))
                 .map(|s| s.id)
                 .collect();
+            // Unpinned images whose four corners are inside the loop.
+            st.sel_images = st
+                .session
+                .content
+                .images
+                .iter()
+                .filter(|i| !i.pinned)
+                .filter(|i| {
+                    let r = i.rect();
+                    [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)]
+                        .iter()
+                        .all(|(x, y)| omascratch_ink::point_in_polygon(kurbo::Point::new(*x, *y), &poly))
+                })
+                .map(|i| i.id)
+                .collect();
+            drop(st);
+            self.queue_draw();
+            return;
+        }
+
+        // Rubber-band finished: select every object the rectangle touches.
+        if let Some((a, b)) = st.marquee.take() {
+            let rect = kurbo::Rect::from_points(a, b);
+            if rect.width() * st.zoom >= 3.0 || rect.height() * st.zoom >= 3.0 {
+                let hits: Vec<StrokeId> = st
+                    .session
+                    .content
+                    .strokes
+                    .iter()
+                    .filter(|s| {
+                        let r = rect.inflate(s.width / 2.0, s.width / 2.0);
+                        s.points.iter().any(|p| r.contains(kurbo::Point::new(p.x, p.y)))
+                    })
+                    .map(|s| s.id)
+                    .collect();
+                let img_hits: Vec<ImageId> = st
+                    .session
+                    .content
+                    .images
+                    .iter()
+                    .filter(|i| !i.pinned && !i.rect().intersect(rect).is_zero_area())
+                    .map(|i| i.id)
+                    .collect();
+                st.selection.extend(hits);
+                st.sel_images.extend(img_hits);
+            }
+            drop(st);
+            self.queue_draw();
+            return;
+        }
+
+        // Resize finished: one exact Replace for strokes + images.
+        if let Some(r) = st.sel_resize.take() {
+            if (r.factor - 1.0).abs() >= 0.001 {
+                let (before_s, after_s): (Vec<Stroke>, Vec<Stroke>) = st
+                    .session
+                    .content
+                    .strokes
+                    .iter()
+                    .filter(|s| st.selection.contains(&s.id))
+                    .map(|s| {
+                        let mut a = s.clone();
+                        for p in &mut a.points {
+                            let q = Self::scale_about(kurbo::Point::new(p.x, p.y), r.anchor, r.factor);
+                            p.x = q.x;
+                            p.y = q.y;
+                        }
+                        a.width = (a.width * r.factor).max(0.3);
+                        (s.clone(), a)
+                    })
+                    .unzip();
+                let (before_i, after_i): (Vec<ImageItem>, Vec<ImageItem>) = st
+                    .session
+                    .content
+                    .images
+                    .iter()
+                    .filter(|i| st.sel_images.contains(&i.id))
+                    .map(|i| {
+                        let mut a = i.clone();
+                        let tl = Self::scale_about(kurbo::Point::new(i.x, i.y), r.anchor, r.factor);
+                        a.x = tl.x;
+                        a.y = tl.y;
+                        a.w = i.w * r.factor;
+                        a.h = i.h * r.factor;
+                        (i.clone(), a)
+                    })
+                    .unzip();
+                for s in &before_s {
+                    st.node_cache.remove(&s.id);
+                }
+                st.session.dispatch(Command::Replace {
+                    strokes_before: before_s,
+                    strokes_after: after_s,
+                    images_before: before_i,
+                    images_after: after_i,
+                });
+                drop(st);
+                self.queue_draw();
+                self.notify_changed();
+                return;
+            }
             drop(st);
             self.queue_draw();
             return;
@@ -1159,12 +1679,44 @@ impl CanvasView {
         // Selection move finished: commit the accumulated offset.
         if st.sel_drag.take().is_some() {
             let offset = std::mem::replace(&mut st.sel_offset, kurbo::Vec2::ZERO);
-            if offset.hypot() >= 0.01 && !st.selection.is_empty() {
-                let ids: Vec<StrokeId> = st.selection.iter().copied().collect();
-                for id in &ids {
-                    st.node_cache.remove(id);
+            if offset.hypot() >= 0.01 && (!st.selection.is_empty() || !st.sel_images.is_empty()) {
+                let (before_s, after_s): (Vec<Stroke>, Vec<Stroke>) = st
+                    .session
+                    .content
+                    .strokes
+                    .iter()
+                    .filter(|s| st.selection.contains(&s.id))
+                    .map(|s| {
+                        let mut a = s.clone();
+                        for p in &mut a.points {
+                            p.x += offset.x;
+                            p.y += offset.y;
+                        }
+                        (s.clone(), a)
+                    })
+                    .unzip();
+                let (before_i, after_i): (Vec<ImageItem>, Vec<ImageItem>) = st
+                    .session
+                    .content
+                    .images
+                    .iter()
+                    .filter(|i| st.sel_images.contains(&i.id))
+                    .map(|i| {
+                        let mut a = i.clone();
+                        a.x += offset.x;
+                        a.y += offset.y;
+                        (i.clone(), a)
+                    })
+                    .unzip();
+                for s in &before_s {
+                    st.node_cache.remove(&s.id);
                 }
-                st.session.dispatch(Command::TranslateStrokes { ids, dx: offset.x, dy: offset.y });
+                st.session.dispatch(Command::Replace {
+                    strokes_before: before_s,
+                    strokes_after: after_s,
+                    images_before: before_i,
+                    images_after: after_i,
+                });
                 drop(st);
                 self.queue_draw();
                 self.notify_changed();
@@ -1343,6 +1895,36 @@ impl CanvasView {
             }
         }
 
+        // Images sit under all ink: pinned first, then unpinned. Selected
+        // images follow a live move/resize preview.
+        let images: Vec<ImageItem> = {
+            let mut v = st.session.content.images.clone();
+            v.sort_by_key(|i| !i.pinned);
+            v
+        };
+        for img in &images {
+            let mut r = img.rect();
+            if st.sel_images.contains(&img.id) {
+                if st.sel_drag.is_some() {
+                    r = r + st.sel_offset;
+                } else if let Some(rz) = st.sel_resize {
+                    let tl = Self::scale_about(kurbo::Point::new(r.x0, r.y0), rz.anchor, rz.factor);
+                    r = kurbo::Rect::new(tl.x, tl.y, tl.x + img.w * rz.factor, tl.y + img.h * rz.factor);
+                }
+            }
+            if r.intersect(visible).is_zero_area() {
+                continue;
+            }
+            let grect = graphene::Rect::new(r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32);
+            match Self::texture_for(&mut st, &img.asset) {
+                Some(tex) => snapshot.append_texture(&tex, &grect),
+                None => {
+                    // Missing asset (e.g. not synced yet): a quiet placeholder.
+                    snapshot.append_color(&gdk::RGBA::new(0.5, 0.5, 0.55, 0.18), &grect);
+                }
+            }
+        }
+
         // Committed strokes: cached node per stroke, culled by bounds.
         let live_simulate = st.live.as_ref().map(|l| l.simulate_pressure);
         let strokes: Vec<(StrokeId, Option<kurbo::Rect>)> =
@@ -1403,8 +1985,8 @@ impl CanvasView {
                     st.node_cache.insert(id, node);
                 }
             }
-            // A selection being dragged renders translated, after this loop.
-            if st.sel_drag.is_some() && st.selection.contains(&id) {
+            // A selection being dragged/resized renders transformed, after this loop.
+            if (st.sel_drag.is_some() || st.sel_resize.is_some()) && st.selection.contains(&id) {
                 continue;
             }
             if let Some(node) = st.node_cache.get(&id) {
@@ -1425,11 +2007,32 @@ impl CanvasView {
             snapshot.restore();
         }
 
-        // Selection bounding box (dashed, constant on-screen width).
-        if !st.selection.is_empty() && !st.lassoing {
+        // Resized selection: strokes scaled about the anchor (width included).
+        if let Some(rz) = st.sel_resize {
+            if !st.selection.is_empty() {
+                snapshot.save();
+                snapshot.translate(&graphene::Point::new(rz.anchor.x as f32, rz.anchor.y as f32));
+                snapshot.scale(rz.factor as f32, rz.factor as f32);
+                snapshot.translate(&graphene::Point::new(-rz.anchor.x as f32, -rz.anchor.y as f32));
+                let ids: Vec<StrokeId> = st.selection.iter().copied().collect();
+                for id in ids {
+                    if let Some(node) = st.node_cache.get(&id) {
+                        snapshot.append_node(node);
+                    }
+                }
+                snapshot.restore();
+            }
+        }
+
+        // Selection bounding box (dashed, constant on-screen width) + handles.
+        if (!st.selection.is_empty() || !st.sel_images.is_empty()) && !st.lassoing {
             if let Some(mut b) = Self::selection_bounds(&st) {
                 if st.sel_drag.is_some() {
                     b = b + st.sel_offset;
+                } else if let Some(rz) = st.sel_resize {
+                    let p0 = Self::scale_about(kurbo::Point::new(b.x0, b.y0), rz.anchor, rz.factor);
+                    let p1 = Self::scale_about(kurbo::Point::new(b.x1, b.y1), rz.anchor, rz.factor);
+                    b = kurbo::Rect::from_points(p0, p1);
                 }
                 let pb = gsk::PathBuilder::new();
                 pb.add_rect(&graphene::Rect::new(
@@ -1441,7 +2044,36 @@ impl CanvasView {
                 let stroke = gsk::Stroke::new((1.5 / st.zoom) as f32);
                 stroke.set_dash(&[(6.0 / st.zoom) as f32, (4.0 / st.zoom) as f32]);
                 snapshot.append_stroke(&pb.to_path(), &stroke, &st.palette.accent);
+
+                // Square corner handles, constant on-screen size.
+                let hs = (8.0 / st.zoom) as f32;
+                let page = if st.inverted { st.palette.bg_inv } else { st.palette.bg };
+                for (cx, cy) in [(b.x0, b.y0), (b.x1, b.y0), (b.x1, b.y1), (b.x0, b.y1)] {
+                    let outer = graphene::Rect::new(cx as f32 - hs / 2.0, cy as f32 - hs / 2.0, hs, hs);
+                    snapshot.append_color(&st.palette.accent, &outer);
+                    let inset = hs * 0.25;
+                    let inner = graphene::Rect::new(
+                        outer.x() + inset,
+                        outer.y() + inset,
+                        hs - 2.0 * inset,
+                        hs - 2.0 * inset,
+                    );
+                    snapshot.append_color(&page, &inner);
+                }
             }
+        }
+
+        // Rubber-band rectangle preview.
+        if let Some((a, b)) = st.marquee {
+            let r = kurbo::Rect::from_points(a, b);
+            let g = graphene::Rect::new(r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32);
+            let acc = st.palette.accent;
+            snapshot.append_color(&gdk::RGBA::new(acc.red(), acc.green(), acc.blue(), 0.10), &g);
+            let pb = gsk::PathBuilder::new();
+            pb.add_rect(&g);
+            let stroke = gsk::Stroke::new((1.2 / st.zoom) as f32);
+            stroke.set_dash(&[(5.0 / st.zoom) as f32, (4.0 / st.zoom) as f32]);
+            snapshot.append_stroke(&pb.to_path(), &stroke, &acc);
         }
 
         // Lasso path preview.

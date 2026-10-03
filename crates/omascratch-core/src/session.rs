@@ -1,7 +1,7 @@
 //! Application/session boundary: the one open note, command dispatch and
 //! undo/redo. Owns authoritative content; the UI holds only transient state.
 
-use crate::note::NoteContent;
+use crate::note::{ImageItem, NoteContent};
 use crate::stroke::{Stroke, StrokeId};
 
 /// An undoable edit. Each variant stores exactly what `revert` needs.
@@ -20,6 +20,16 @@ pub enum Command {
         ids: Vec<StrokeId>,
         dx: f64,
         dy: f64,
+    },
+    /// Exact before/after replacement of strokes and images, matched by id:
+    /// same id = transformed in place (z-order kept), id only in `before` =
+    /// removed, id only in `after` = added. Covers move, resize, pin toggle,
+    /// image add/delete. Undo swaps before/after, so it is lossless.
+    Replace {
+        strokes_before: Vec<Stroke>,
+        strokes_after: Vec<Stroke>,
+        images_before: Vec<ImageItem>,
+        images_after: Vec<ImageItem>,
     },
 }
 
@@ -83,6 +93,9 @@ impl NoteSession {
                 self.content.strokes.extend(replacements.iter().cloned());
             }
             Command::TranslateStrokes { ids, dx, dy } => self.translate(ids, *dx, *dy),
+            Command::Replace { strokes_before, strokes_after, images_before, images_after } => {
+                self.replace(strokes_before, strokes_after, images_before, images_after)
+            }
         }
     }
 
@@ -103,6 +116,48 @@ impl NoteSession {
                 self.content.strokes.extend(removed.iter().cloned());
             }
             Command::TranslateStrokes { ids, dx, dy } => self.translate(ids, -*dx, -*dy),
+            Command::Replace { strokes_before, strokes_after, images_before, images_after } => {
+                self.replace(strokes_after, strokes_before, images_after, images_before)
+            }
+        }
+    }
+
+    fn replace(
+        &mut self,
+        s_from: &[Stroke],
+        s_to: &[Stroke],
+        i_from: &[ImageItem],
+        i_to: &[ImageItem],
+    ) {
+        for b in s_from {
+            if let Some(idx) = self.content.stroke_index(b.id) {
+                match s_to.iter().find(|a| a.id == b.id) {
+                    Some(a) => self.content.strokes[idx] = a.clone(),
+                    None => {
+                        self.content.strokes.remove(idx);
+                    }
+                }
+            }
+        }
+        for a in s_to {
+            if !s_from.iter().any(|b| b.id == a.id) {
+                self.content.strokes.push(a.clone());
+            }
+        }
+        for b in i_from {
+            if let Some(idx) = self.content.image_index(b.id) {
+                match i_to.iter().find(|a| a.id == b.id) {
+                    Some(a) => self.content.images[idx] = a.clone(),
+                    None => {
+                        self.content.images.remove(idx);
+                    }
+                }
+            }
+        }
+        for a in i_to {
+            if !i_from.iter().any(|b| b.id == a.id) {
+                self.content.images.push(a.clone());
+            }
         }
     }
 
@@ -184,6 +239,77 @@ mod tests {
         assert_eq!(s.content.strokes[0].points[0].y, orig[0].y - 4.0);
         s.undo();
         assert_eq!(s.content.strokes[0].points, orig);
+    }
+
+    fn image(x: f64) -> ImageItem {
+        ImageItem {
+            id: crate::id::ImageId::new(),
+            asset: "img-test.png".into(),
+            x,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn replace_add_transform_delete_all_undo_exactly() {
+        let mut s = NoteSession::default();
+        let a = stroke();
+        let img = image(0.0);
+        // Add an image + stroke in one step.
+        s.dispatch(Command::Replace {
+            strokes_before: vec![],
+            strokes_after: vec![a.clone()],
+            images_before: vec![],
+            images_after: vec![img.clone()],
+        });
+        assert_eq!((s.content.strokes.len(), s.content.images.len()), (1, 1));
+
+        // Transform in place (move image, pin it).
+        let mut moved = img.clone();
+        moved.x = 50.0;
+        moved.pinned = true;
+        s.dispatch(Command::Replace {
+            strokes_before: vec![],
+            strokes_after: vec![],
+            images_before: vec![img.clone()],
+            images_after: vec![moved.clone()],
+        });
+        assert_eq!(s.content.images[0], moved);
+
+        // Delete both.
+        s.dispatch(Command::Replace {
+            strokes_before: vec![a.clone()],
+            strokes_after: vec![],
+            images_before: vec![moved.clone()],
+            images_after: vec![],
+        });
+        assert!(s.content.strokes.is_empty() && s.content.images.is_empty());
+
+        s.undo();
+        assert_eq!(s.content.images[0], moved);
+        s.undo();
+        assert_eq!(s.content.images[0], img);
+        s.undo();
+        assert!(s.content.strokes.is_empty() && s.content.images.is_empty());
+    }
+
+    #[test]
+    fn replace_keeps_z_order_for_transforms() {
+        let mut s = NoteSession::default();
+        let (a, b, c) = (stroke(), stroke(), stroke());
+        s.dispatch(Command::AddStrokes(vec![a.clone(), b.clone(), c.clone()]));
+        let mut b2 = b.clone();
+        b2.width = 9.0;
+        s.dispatch(Command::Replace {
+            strokes_before: vec![b.clone()],
+            strokes_after: vec![b2.clone()],
+            images_before: vec![],
+            images_after: vec![],
+        });
+        assert_eq!(s.content.strokes[1], b2, "transformed stroke stays in place");
     }
 
     #[test]

@@ -20,6 +20,23 @@ pub fn write_note(path: &Path, doc: &NoteDoc, modified_ms: u64) -> Result<()> {
     atomic_write(path, &compressed)
 }
 
+/// Directory holding a note's image assets: `notes/<uuid>.assets/`.
+pub fn assets_dir(note_path: &Path) -> std::path::PathBuf {
+    let stem = note_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    note_path.with_file_name(format!("{stem}.assets"))
+}
+
+/// Write an image asset beside the note. Names are unique (uuid v7) and the
+/// file is never rewritten, so syncing machines can't conflict on assets and
+/// undo of a deleted image always finds its file. Returns the asset name.
+pub fn write_asset(note_path: &Path, bytes: &[u8], ext: &str) -> Result<String> {
+    let dir = assets_dir(note_path);
+    std::fs::create_dir_all(&dir).map_err(|e| StoreError::io(&dir, e))?;
+    let name = format!("img-{}.{ext}", uuid::Uuid::now_v7());
+    atomic_write(&dir.join(&name), bytes)?;
+    Ok(name)
+}
+
 pub fn read_note(path: &Path) -> Result<NoteDoc> {
     let bytes = std::fs::read(path).map_err(|e| StoreError::io(path, e))?;
     let json = zstd::decode_all(bytes.as_slice())
@@ -70,6 +87,7 @@ mod tests {
                         InkPoint { x: 3.0, y: 4.0, pressure: 0.9, tilt_x: 0.0, tilt_y: 0.0, dt_ms: 7 },
                     ],
                 }],
+                images: vec![],
             },
             opaque_elements: vec![],
         }
@@ -114,6 +132,29 @@ mod tests {
         ));
         // The file is untouched by the failed read.
         assert_eq!(std::fs::read(&p).unwrap(), bytes);
+    }
+
+    #[test]
+    fn images_round_trip_and_assets_live_beside_the_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("n.omanote");
+        let mut d = doc();
+        let name = write_asset(&p, b"\x89PNG fake", "png").unwrap();
+        assert!(assets_dir(&p).join(&name).exists());
+        assert!(assets_dir(&p).ends_with("n.assets"));
+        d.content.images.push(omascratch_core::ImageItem {
+            id: omascratch_core::ImageId::new(),
+            asset: name.clone(),
+            x: 10.0,
+            y: 20.0,
+            w: 300.0,
+            h: 200.0,
+            pinned: true,
+        });
+        write_note(&p, &d, 5).unwrap();
+        let back = read_note(&p).unwrap();
+        assert_eq!(back.content.images, d.content.images);
+        assert!(back.opaque_elements.is_empty(), "images are known elements, not opaque");
     }
 
     #[test]

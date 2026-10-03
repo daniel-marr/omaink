@@ -13,8 +13,8 @@ pub mod stroke;
 
 pub use background::{BackgroundKind, PageBackground};
 pub use color::{Rgba, SemanticColor};
-pub use id::{FolderId, NotebookId, NoteId};
-pub use note::NoteContent;
+pub use id::{FolderId, ImageId, NotebookId, NoteId};
+pub use note::{ImageItem, NoteContent};
 pub use order::{key_after_last, key_between};
 pub use session::{Command, NoteSession};
 pub use stroke::{InkPoint, Stroke, StrokeId, Tool};

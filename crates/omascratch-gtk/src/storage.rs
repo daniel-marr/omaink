@@ -71,6 +71,7 @@ impl Storage {
     }
 
     pub fn load_into_canvas(&self, canvas: &CanvasView) {
+        canvas.set_asset_dir(store::assets_dir(&self.path.borrow()));
         canvas.set_content(self.doc.borrow().content.clone());
         canvas.set_background(self.doc.borrow().background);
         // A freshly loaded note starts at session revision 0.
@@ -89,6 +90,19 @@ impl Storage {
         }
         if revision > self.last_saved.get() {
             self.last_saved.set(revision);
+        }
+    }
+
+    /// Persist pasted image bytes beside the open note; returns the asset
+    /// name. Synchronous: it runs once per paste and must exist before the
+    /// image element referencing it is saved.
+    pub fn write_asset(&self, bytes: &[u8]) -> Option<String> {
+        match store::write_asset(&self.path.borrow(), bytes, "png") {
+            Ok(name) => Some(name),
+            Err(e) => {
+                tracing::error!("saving pasted image failed: {e}");
+                None
+            }
         }
     }
 

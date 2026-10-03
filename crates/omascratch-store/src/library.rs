@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn notes_in_a_folder_get_ascending_order_keys() {
-        let (_root, mut tree) = nb();
+        let (_root, tree) = nb();
         let f = create_folder(&tree, "F", None).unwrap();
         let (a, _) = create_note(&tree, "A", Some(f.id)).unwrap();
         let (b, _) = create_note(&tree, "B", Some(f.id)).unwrap();
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn reorder_between_two_notes_touches_only_the_moved_note() {
-        let (_root, mut tree) = nb();
+        let (_root, tree) = nb();
         let (a, pa) = create_note(&tree, "A", None).unwrap();
         let (b, _pb) = create_note(&tree, "B", None).unwrap();
         let (_c, pc) = create_note(&tree, "C", None).unwrap();

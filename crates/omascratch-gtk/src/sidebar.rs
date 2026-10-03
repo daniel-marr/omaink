@@ -686,6 +686,14 @@ impl Sidebar {
             ("Ctrl+0", "Reset view"),
             ("Scroll / middle-drag", "Pan"),
             ("Ctrl+Scroll", "Zoom"),
+            ("Ctrl+C / X / V", "Copy / cut / paste (images too)"),
+            ("Delete", "Delete selection"),
+            ("Pointer: drag empty canvas", "Select everything in the box"),
+            ("Shift+click / Shift+drag", "Add to / remove from selection"),
+            ("Drag a corner handle", "Resize selection"),
+            ("Shift while drawing a shape", "Square / circle / 45°"),
+            ("Right-click / hold an image", "Pin to background / delete"),
+            ("Pen button", "Toggle eraser"),
             ("O", "Debug overlay"),
         ] {
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);

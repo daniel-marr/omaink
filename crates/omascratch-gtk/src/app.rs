@@ -44,6 +44,14 @@ fn build_window(app: &adw::Application) {
         let tb = draw_toolbar.clone();
         canvas.set_on_eraser_toggle(move || tb.toggle_eraser());
     }
+    {
+        // Pasted images: bytes saved beside the open note; afterwards the
+        // toolbar switches to Select so the image can be moved right away.
+        let st = storage.clone();
+        canvas.set_asset_writer(move |bytes| st.write_asset(bytes));
+        let tb = draw_toolbar.clone();
+        canvas.set_on_request_select(move || tb.select_tool());
+    }
     toolbar.set_start_widget(Some(&draw_toolbar.widget));
     {
         // Persist background changes into the open note.
@@ -152,10 +160,15 @@ fn build_window(app: &adw::Application) {
     // Notebook renamed: if the open note lived inside, follow its new path.
     {
         let storage = storage.clone();
+        let canvas_w = canvas.downgrade();
         sidebar.set_on_notebook_renamed(move |old_dir, new_dir| {
             let cur = storage.current_path();
             if let Ok(rest) = cur.strip_prefix(old_dir) {
-                storage.relocate(new_dir.join(rest));
+                let new_path = new_dir.join(rest);
+                if let Some(canvas) = canvas_w.upgrade() {
+                    canvas.set_asset_dir(omascratch_store::assets_dir(&new_path));
+                }
+                storage.relocate(new_path);
             }
         });
     }
@@ -243,8 +256,8 @@ fn install_shortcuts(
                 c.cut_selection();
                 glib::Propagation::Stop
             }
-            gdk::Key::v if ctrl && c.clipboard_has_strokes() => {
-                c.paste_clipboard();
+            gdk::Key::v if ctrl => {
+                c.paste();
                 glib::Propagation::Stop
             }
             gdk::Key::Delete | gdk::Key::BackSpace if c.has_selection() => {

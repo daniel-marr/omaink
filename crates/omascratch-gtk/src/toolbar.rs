@@ -591,7 +591,7 @@ impl Toolbar {
         paste_btn.add_css_class("flat");
         paste_btn.set_tooltip_text(Some("Paste (Ctrl+V)"));
         let c = canvas.clone();
-        paste_btn.connect_clicked(move |_| c.paste_clipboard());
+        paste_btn.connect_clicked(move |_| c.paste());
         tb.widget.append(&copy_btn);
         tb.widget.append(&paste_btn);
         tb.widget.append(&vsep());
@@ -682,6 +682,11 @@ impl Toolbar {
         // Apply the restored mode.
         tb.set_mode(tb.inner.mode.get());
         tb
+    }
+
+    /// Switch to the Select tool (e.g. right after pasting an image).
+    pub fn select_tool(&self) {
+        self.set_mode(Mode::Select);
     }
 
     /// Stylus barrel button: flip between the eraser and the previous tool.

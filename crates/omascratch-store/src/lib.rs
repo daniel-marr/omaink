@@ -15,7 +15,7 @@ pub mod schema;
 pub mod xdg;
 
 pub use error::{Result, StoreError};
-pub use note_file::{read_note, write_note, NOTE_EXT};
+pub use note_file::{assets_dir, read_note, write_asset, write_note, NOTE_EXT};
 pub use notebook::{
     create_notebook, is_conflict_name, note_path, scan_notebook, scan_root, FolderMeta,
     NotebookMeta, NotebookTree, NoteEntry,

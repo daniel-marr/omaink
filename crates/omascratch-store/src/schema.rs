@@ -31,6 +31,8 @@ pub struct NoteFileV1 {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DiskElement {
     Stroke(DiskStroke),
+    /// Images reference an immutable asset file in `<note-id>.assets/`.
+    Image(omascratch_core::ImageItem),
     /// Element kinds this build doesn't know. Kept verbatim and written back.
     #[serde(untagged)]
     Unknown(serde_json::Value),
@@ -159,6 +161,7 @@ impl NoteDoc {
             .iter()
             .map(|s| DiskElement::Stroke(s.into()))
             .collect();
+        elements.extend(self.content.images.iter().cloned().map(DiskElement::Image));
         elements.extend(self.opaque_elements.iter().cloned().map(DiskElement::Unknown));
         NoteFileV1 {
             schema: NOTE_SCHEMA,
@@ -179,6 +182,7 @@ impl NoteDoc {
         for el in f.elements {
             match el {
                 DiskElement::Stroke(s) => content.strokes.push(s.into()),
+                DiskElement::Image(i) => content.images.push(i),
                 DiskElement::Unknown(v) => opaque.push(v),
             }
         }

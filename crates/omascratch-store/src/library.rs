@@ -206,6 +206,30 @@ pub fn create_note(
     Ok((doc, path))
 }
 
+/// Create a note with a caller-supplied order key (callers that already know
+/// the sibling keys — e.g. from a metadata cache — avoid rescanning disk).
+pub fn create_note_with_key(
+    notebook: &NotebookTree,
+    title: &str,
+    folder: Option<FolderId>,
+    order_key: String,
+) -> Result<(NoteDoc, PathBuf)> {
+    let doc = NoteDoc {
+        id: NoteId::new(),
+        title: title.to_string(),
+        folder,
+        order_key,
+        created_ms: now_ms(),
+        modified_ms: now_ms(),
+        background: Default::default(),
+        content: omascratch_core::NoteContent::default(),
+        opaque_elements: vec![],
+    };
+    let path = note_path(&notebook.dir, doc.id);
+    write_note(&path, &doc, doc.modified_ms)?;
+    Ok((doc, path))
+}
+
 /// Rename a note on disk. For the note currently open in the canvas, prefer
 /// renaming through the storage adapter's in-memory doc instead, to avoid
 /// racing autosave.

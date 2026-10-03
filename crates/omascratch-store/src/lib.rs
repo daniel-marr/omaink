@@ -15,13 +15,13 @@ pub mod schema;
 pub mod xdg;
 
 pub use error::{Result, StoreError};
-pub use note_file::{assets_dir, read_note, write_asset, write_note, NOTE_EXT};
+pub use note_file::{assets_dir, read_note, read_note_meta, write_asset, write_note, NoteMeta, NOTE_EXT};
 pub use notebook::{
     create_notebook, is_conflict_name, note_path, scan_notebook, scan_root, FolderMeta,
     NotebookMeta, NotebookTree, NoteEntry,
 };
 pub use library::{
-    create_folder, create_note, delete_folder, delete_note, delete_notebook, order_between,
+    create_folder, create_note, create_note_with_key, delete_folder, delete_note, delete_notebook, order_between,
     reload_notebook, rename_folder, rename_note, rename_notebook, set_folder_order, set_note_order,
 };
 pub use schema::{NoteDoc, NOTE_SCHEMA};

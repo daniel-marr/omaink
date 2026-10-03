@@ -63,6 +63,19 @@ All verified interactively by the user on the live session through many build-te
 - Stylus barrel button: click toggles eraser (and back to previous tool); stylus never triggers middle-drag pan. Pending user confirmation of button delivery on the XP-Pen (debug overlay shows b1/b2/b3 masks).
 - Desktop: Omarchy's default-opacity window rule (0.96 inactive) identified as the unfocused "dulling"; opt-out rule with `override` added to the USER's `~/.config/hypr/hyprland.lua` (not part of this repo; documented here), validated via `hyprctl reload` + `configerrors`.
 
+### Performance — reproduced benchmark (2026-10-03, release build, this machine)
+
+Harness: `crates/omascratch-store/examples/gen_stress.rs` builds an isolated profile (1 note × 5,000 handwriting-like strokes + 300 notes in 10 folders, 39 MB); `OMASCRATCH_PERF=1 ./target/release/omascratch` (with `XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME` pointed at the profile) runs a scripted pan, eraser sweep, lasso and select hit-test, logs `[perf]` lines and quits. CPU time of our code only (snapshot construction, hit tests) — GPU rasterization is not measured.
+
+| Measure | Before | After |
+|---|---|---|
+| Sidebar `rows()` | ~900 ms, 3× at startup | 254 ms cold (header-only decode) · 0.4–0.7 ms warm (mtime/size cache in `~/.cache/omascratch/note-meta.json`) |
+| Eraser hit-test | 2.17 ms/sample | 0.006 ms/sample (per-stroke bounds prefilter) |
+| Pan frame (snapshot) | 1.66 ms avg, 2.95 max | 0.33 ms avg, 0.98 max (bounds cached per revision, not per frame) |
+| Big-note open (read+decode) | 285 ms | 264–285 ms (unchanged — JSON point encoding; follow-up) |
+
+Correctness parity in the same runs: eraser sweep hits (10) and lasso selection (114) identical before/after. Also fixed: sync conflict copies were never listed in the sidebar (filenames don't parse as ids); rows are now keyed by path and conflict copies show with a "(sync conflict)" suffix.
+
 ## Historical
 
 None.

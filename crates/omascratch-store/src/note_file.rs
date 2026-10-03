@@ -37,6 +37,39 @@ pub fn write_asset(note_path: &Path, bytes: &[u8], ext: &str) -> Result<String> 
     Ok(name)
 }
 
+/// Just the sidebar-relevant header of a note. Element payloads are skipped
+/// (`IgnoredAny`), so no stroke data is allocated.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NoteMeta {
+    pub id: omascratch_core::NoteId,
+    pub title: String,
+    pub folder: Option<omascratch_core::FolderId>,
+    pub order_key: String,
+}
+
+pub fn read_note_meta(path: &Path) -> Result<NoteMeta> {
+    #[derive(serde::Deserialize)]
+    struct Header {
+        schema: u32,
+        id: omascratch_core::NoteId,
+        title: String,
+        folder: Option<omascratch_core::FolderId>,
+        order_key: String,
+        #[allow(dead_code)]
+        #[serde(default)]
+        elements: serde::de::IgnoredAny,
+    }
+    let bytes = std::fs::read(path).map_err(|e| StoreError::io(path, e))?;
+    let json = zstd::decode_all(bytes.as_slice())
+        .map_err(|e| StoreError::corrupt(path, format!("zstd: {e}")))?;
+    let h: Header = serde_json::from_slice(&json)
+        .map_err(|e| StoreError::corrupt(path, format!("json: {e}")))?;
+    if h.schema > NOTE_SCHEMA {
+        return Err(StoreError::NewerSchema { path: path.to_path_buf(), found: h.schema, supported: NOTE_SCHEMA });
+    }
+    Ok(NoteMeta { id: h.id, title: h.title, folder: h.folder, order_key: h.order_key })
+}
+
 pub fn read_note(path: &Path) -> Result<NoteDoc> {
     let bytes = std::fs::read(path).map_err(|e| StoreError::io(path, e))?;
     let json = zstd::decode_all(bytes.as_slice())
@@ -132,6 +165,16 @@ mod tests {
         ));
         // The file is untouched by the failed read.
         assert_eq!(std::fs::read(&p).unwrap(), bytes);
+    }
+
+    #[test]
+    fn meta_read_matches_full_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("n.omanote");
+        let d = doc();
+        write_note(&p, &d, 1).unwrap();
+        let m = read_note_meta(&p).unwrap();
+        assert_eq!((m.id, m.title.as_str(), m.folder, m.order_key.as_str()), (d.id, "Test note", None, "a0"));
     }
 
     #[test]

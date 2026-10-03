@@ -5,13 +5,24 @@
 //! Scans here are synchronous (metadata-only, small). Note *content* loading
 //! and saving stays on workers in `storage.rs`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use omascratch_core::{FolderId, NoteId};
 use omascratch_store as store;
-use store::{FolderMeta, NotebookTree, Settings};
+use store::{FolderMeta, NoteMeta, NotebookTree, Settings};
+
+const META_CACHE_FILE: &str = "note-meta.json";
+
+/// Cached note header, valid while the file's mtime and size are unchanged.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct MetaEntry {
+    mtime_ns: u64,
+    size: u64,
+    meta: NoteMeta,
+}
 
 /// One row the sidebar can show, already resolved to display data.
 #[derive(Debug, Clone)]
@@ -26,6 +37,10 @@ pub struct Library {
     pub notebooks: RefCell<Vec<String>>,
     /// The currently selected notebook's full scan.
     pub current: RefCell<Option<NotebookTree>>,
+    /// Note headers keyed by path; persisted to the XDG cache so cold starts
+    /// only stat files instead of decoding every note.
+    meta_cache: RefCell<HashMap<String, MetaEntry>>,
+    meta_dirty: Cell<bool>,
 }
 
 impl Library {
@@ -36,11 +51,55 @@ impl Library {
         let (notebooks, _skipped) = store::scan_root(&root).unwrap_or_default();
         let names: Vec<String> = notebooks.iter().map(|n| n.meta.name.clone()).collect();
         let current = notebooks.into_iter().next();
+        let meta_cache = std::fs::read(store::cache_dir().join(META_CACHE_FILE))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
         Rc::new(Library {
             root,
             notebooks: RefCell::new(names),
             current: RefCell::new(current),
+            meta_cache: RefCell::new(meta_cache),
+            meta_dirty: Cell::new(false),
         })
+    }
+
+    /// A note's header: from cache if the file is unchanged, else decoded
+    /// (header only) and cached.
+    fn note_meta(&self, path: &Path) -> Option<NoteMeta> {
+        let md = std::fs::metadata(path).ok()?;
+        let mtime_ns = md
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos() as u64;
+        let size = md.len();
+        let key = path.to_string_lossy().to_string();
+        if let Some(e) = self.meta_cache.borrow().get(&key) {
+            if e.mtime_ns == mtime_ns && e.size == size {
+                return Some(e.meta.clone());
+            }
+        }
+        let meta = store::read_note_meta(path).ok()?;
+        self.meta_cache
+            .borrow_mut()
+            .insert(key, MetaEntry { mtime_ns, size, meta: meta.clone() });
+        self.meta_dirty.set(true);
+        Some(meta)
+    }
+
+    /// Write the cache if it changed, dropping entries for vanished files.
+    fn persist_meta_cache(&self) {
+        if !self.meta_dirty.replace(false) {
+            return;
+        }
+        self.meta_cache.borrow_mut().retain(|k, _| Path::new(k).exists());
+        let dir = store::cache_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(bytes) = serde_json::to_vec(&*self.meta_cache.borrow()) {
+            let _ = store::atomic::atomic_write(&dir.join(META_CACHE_FILE), &bytes);
+        }
     }
 
     pub fn current_notebook_name(&self) -> String {
@@ -74,16 +133,26 @@ impl Library {
     /// Flatten the current notebook into display rows: folders (depth-first by
     /// order key) each followed by their notes, then top-level notes.
     pub fn rows(&self) -> Vec<Row> {
+        crate::perf::time("sidebar rows()", || self.rows_inner())
+    }
+
+    fn rows_inner(&self) -> Vec<Row> {
         let guard = self.current.borrow();
         let Some(nb) = guard.as_ref() else { return Vec::new() };
 
-        // Note metadata, loaded once (title/folder/order live in the file).
+        // Note headers via the metadata cache. Rows are keyed by path, so
+        // sync conflict copies (whose filenames aren't plain ids) show up too.
         let mut notes: Vec<(NoteId, PathBuf, String, Option<FolderId>, String, bool)> = Vec::new();
         for entry in &nb.notes {
-            if let (Some(id), Ok(doc)) = (entry.id, store::read_note(&entry.path)) {
-                notes.push((id, entry.path.clone(), doc.title, doc.folder, doc.order_key, entry.conflict));
+            if let Some(m) = self.note_meta(&entry.path) {
+                let title = if entry.conflict { format!("{} (sync conflict)", m.title) } else { m.title };
+                notes.push((m.id, entry.path.clone(), title, m.folder, m.order_key, entry.conflict));
             }
         }
+        drop(guard);
+        self.persist_meta_cache();
+        let guard = self.current.borrow();
+        let Some(nb) = guard.as_ref() else { return Vec::new() };
 
         let mut rows = Vec::new();
         fn push_folder(
@@ -182,10 +251,12 @@ impl Library {
 
     pub fn new_note(&self, folder: Option<FolderId>) -> Option<(NoteId, PathBuf)> {
         self.ensure_notebook();
+        let keys: Vec<String> = self.notes_in_folder(folder, None).into_iter().map(|(_, k)| k).collect();
+        let key = omascratch_core::key_after_last(&keys);
         let result = {
             let guard = self.current.borrow();
             let nb = guard.as_ref()?;
-            store::create_note(nb, "Untitled", folder).ok()
+            store::create_note_with_key(nb, "Untitled", folder, key).ok()
         };
         self.rescan_current();
         result.map(|(doc, path)| (doc.id, path))
@@ -245,19 +316,18 @@ impl Library {
 
     /// (path, order_key) of notes in `folder`, sorted, optionally excluding one.
     fn notes_in_folder(&self, folder: Option<FolderId>, exclude: Option<&Path>) -> Vec<(PathBuf, String)> {
-        let guard = self.current.borrow();
-        let Some(nb) = guard.as_ref() else { return Vec::new() };
-        let mut v: Vec<(PathBuf, String)> = Vec::new();
-        for entry in &nb.notes {
-            if exclude == Some(entry.path.as_path()) {
-                continue;
-            }
-            if let Ok(doc) = store::read_note(&entry.path) {
-                if doc.folder == folder {
-                    v.push((entry.path.clone(), doc.order_key));
-                }
-            }
-        }
+        let paths: Vec<PathBuf> = match self.current.borrow().as_ref() {
+            Some(nb) => nb.notes.iter().map(|e| e.path.clone()).collect(),
+            None => return Vec::new(),
+        };
+        let mut v: Vec<(PathBuf, String)> = paths
+            .into_iter()
+            .filter(|p| exclude != Some(p.as_path()))
+            .filter_map(|p| {
+                let m = self.note_meta(&p)?;
+                (m.folder == folder).then(|| (p, m.order_key))
+            })
+            .collect();
         v.sort_by(|a, b| a.1.cmp(&b.1));
         v
     }
@@ -276,7 +346,7 @@ impl Library {
         if src == target {
             return;
         }
-        let Ok(tdoc) = store::read_note(target) else { return };
+        let Some(tdoc) = self.note_meta(target) else { return };
         let folder = tdoc.folder;
         let siblings = self.notes_in_folder(folder, Some(src));
         let Some(idx) = siblings.iter().position(|(p, _)| p == target) else { return };

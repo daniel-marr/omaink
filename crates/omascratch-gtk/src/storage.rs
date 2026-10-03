@@ -41,7 +41,7 @@ pub struct Storage {
 impl Storage {
     /// Open an existing note file as the initial open note.
     pub fn open(path: PathBuf) -> Rc<Storage> {
-        let doc = store::read_note(&path).unwrap_or_else(|_| NoteDoc {
+        let doc = crate::perf::time("startup note read+decode", || store::read_note(&path)).unwrap_or_else(|_| NoteDoc {
             id: omascratch_core::NoteId::new(),
             title: "Untitled".into(),
             folder: None,
@@ -126,7 +126,7 @@ impl Storage {
         if *self.path.borrow() != path {
             let _ = self.save_final(canvas);
         }
-        let doc = match store::read_note(path) {
+        let doc = match crate::perf::time("note read+decode", || store::read_note(path)) {
             Ok(d) => d,
             Err(e) => {
                 tracing::error!("cannot open note {}: {e}", path.display());

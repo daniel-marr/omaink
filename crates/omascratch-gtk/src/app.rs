@@ -12,7 +12,12 @@ use crate::theme;
 use crate::APP_ID;
 
 pub fn run() -> glib::ExitCode {
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    let mut builder = adw::Application::builder().application_id(APP_ID);
+    if crate::perf::enabled() {
+        // Benchmark runs must not hand off to an already-running instance.
+        builder = builder.flags(gtk4::gio::ApplicationFlags::NON_UNIQUE);
+    }
+    let app = builder.build();
     app.connect_activate(build_window);
     app.run()
 }
@@ -196,6 +201,9 @@ fn build_window(app: &adw::Application) {
         let _ = &theme_mgr;
     });
     window.present();
+    if crate::perf::enabled() {
+        canvas.run_perf_bench();
+    }
 }
 
 fn first_note_path(library: &Rc<Library>) -> std::path::PathBuf {

@@ -200,6 +200,13 @@ pub struct State {
     panning: Option<(f64, f64, kurbo::Vec2)>,
     /// App-internal stroke clipboard (copy/cut/paste of selections).
     clipboard: Vec<Stroke>,
+    /// Perf mode: snapshot() durations (ms).
+    perf_frames: Vec<f64>,
+    /// Per-stroke bounds aligned with `session.content.strokes`, valid while
+    /// `bounds_rev == session.revision()`. Used for culling and as a cheap
+    /// prefilter before exact hit tests (eraser, select).
+    bounds: Vec<Option<kurbo::Rect>>,
+    bounds_rev: u64,
     /// Light-canvas inversion (page + semantic ink flip; fixed colors stay).
     inverted: bool,
     background: PageBackground,
@@ -247,6 +254,9 @@ impl Default for State {
             shift_down: false,
             panning: None,
             clipboard: Vec::new(),
+            perf_frames: Vec::new(),
+            bounds: Vec::new(),
+            bounds_rev: u64::MAX,
             inverted: false,
             background: PageBackground::default(),
             palette: CanvasPalette::default(),
@@ -285,7 +295,14 @@ mod imp {
 
     impl WidgetImpl for CanvasView {
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
-            self.obj().draw(snapshot);
+            if crate::perf::enabled() {
+                let t = Instant::now();
+                self.obj().draw(snapshot);
+                let ms = t.elapsed().as_secs_f64() * 1000.0;
+                self.state.borrow_mut().perf_frames.push(ms);
+            } else {
+                self.obj().draw(snapshot);
+            }
         }
     }
 }
@@ -446,6 +463,7 @@ impl CanvasView {
         let mut st = self.imp().state.borrow_mut();
         st.session = NoteSession::new(content);
         st.node_cache.clear();
+        st.bounds_rev = u64::MAX;
         st.live = None;
         st.erasing = false;
         st.live_erased.clear();
@@ -510,6 +528,90 @@ impl CanvasView {
                 st.on_zoom = Some(hook);
             }
         }
+    }
+
+    /// Perf mode: scripted benchmark — first frames, a 120-frame pan, an
+    /// eraser sweep and a full-page lasso — then quit.
+    pub fn run_perf_bench(&self) {
+        let view = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
+            let n = view.imp().state.borrow().session.content.strokes.len();
+            eprintln!("[perf] note strokes: {n}");
+            let mut first = std::mem::take(&mut view.imp().state.borrow_mut().perf_frames);
+            crate::perf::summarize("frames during open (incl. cache build)", &mut first);
+
+            let ticks = std::rc::Rc::new(std::cell::Cell::new(0u32));
+            let v = view.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+                let t = ticks.get();
+                if t >= 120 {
+                    let mut f = std::mem::take(&mut v.imp().state.borrow_mut().perf_frames);
+                    crate::perf::summarize("pan frames (120 x 35 units)", &mut f);
+                    v.bench_hit_tests();
+                    if let Some(win) = v.root().and_downcast::<gtk::Window>() {
+                        win.close();
+                    }
+                    return glib::ControlFlow::Break;
+                }
+                ticks.set(t + 1);
+                {
+                    let mut st = v.imp().state.borrow_mut();
+                    st.offset.y += 35.0;
+                }
+                v.queue_draw();
+                glib::ControlFlow::Continue
+            });
+        });
+    }
+
+    fn bench_hit_tests(&self) {
+        let mut st = self.imp().state.borrow_mut();
+        let (vw, vh) = (self.width() as f64, self.height() as f64);
+        // Eraser sweep: 300 samples across the middle of the view.
+        let cy = st.offset.y + vh / 2.0 / st.zoom;
+        let x0 = st.offset.x;
+        let t = Instant::now();
+        let kind = st.eraser_kind;
+        st.eraser_kind = EraserKind::Stroke;
+        for i in 0..300 {
+            let wx = x0 + (i as f64) * (vw / st.zoom) / 300.0;
+            Self::erase_at(&mut st, wx, cy);
+        }
+        let hits = st.live_erased.len();
+        st.live_erased.clear();
+        st.eraser_kind = kind;
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("[perf] eraser sweep: 300 samples in {ms:.2} ms ({:.3} ms/sample, {hits} hits)", ms / 300.0);
+
+        // Lasso around the visible area.
+        let poly = vec![
+            kurbo::Point::new(st.offset.x, st.offset.y),
+            kurbo::Point::new(st.offset.x + vw / st.zoom, st.offset.y),
+            kurbo::Point::new(st.offset.x + vw / st.zoom, st.offset.y + vh / st.zoom),
+            kurbo::Point::new(st.offset.x, st.offset.y + vh / st.zoom),
+        ];
+        let t = Instant::now();
+        let sel = st
+            .session
+            .content
+            .strokes
+            .iter()
+            .filter(|s| omascratch_ink::stroke_inside_polygon(&s.points, &poly))
+            .count();
+        eprintln!("[perf] lasso visible area: {sel} selected in {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+
+        // Select-tool click hit test at the view center.
+        let wp = kurbo::Point::new(st.offset.x + vw / 2.0 / st.zoom, cy);
+        let t = Instant::now();
+        let radius = 6.0 / st.zoom;
+        let _ = st
+            .session
+            .content
+            .strokes
+            .iter()
+            .rev()
+            .find(|s| omascratch_ink::stroke_hit(&s.points, s.width, wp, radius));
+        eprintln!("[perf] select click hit-test: {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
     }
 
     /// Return to 100% zoom, anchored at the viewport center.
@@ -1298,14 +1400,17 @@ impl CanvasView {
                 // Click an object to select it (Shift toggles it in/out of
                 // the selection); a plain click also allows dragging at once.
                 let radius = 6.0 / st.zoom;
+                Self::ensure_bounds(st);
                 let stroke_hit = st
                     .session
                     .content
                     .strokes
                     .iter()
+                    .zip(st.bounds.iter())
                     .rev()
-                    .find(|s| omascratch_ink::stroke_hit(&s.points, s.width, wp, radius))
-                    .map(|s| s.id);
+                    .filter(|(_, b)| b.is_some_and(|b| b.inflate(radius, radius).contains(wp)))
+                    .find(|(s, _)| omascratch_ink::stroke_hit(&s.points, s.width, wp, radius))
+                    .map(|(s, _)| s.id);
                 let image_hit = if stroke_hit.is_none() { Self::image_at(st, wp, false) } else { None };
                 if additive {
                     if let Some(id) = stroke_hit {
@@ -1441,6 +1546,19 @@ impl CanvasView {
         self.queue_draw();
     }
 
+    /// Rebuild the bounds cache if content changed since it was built; also
+    /// prunes render nodes of strokes that no longer exist.
+    fn ensure_bounds(st: &mut State) {
+        let rev = st.session.revision();
+        if st.bounds_rev == rev && st.bounds.len() == st.session.content.strokes.len() {
+            return;
+        }
+        st.bounds = st.session.content.strokes.iter().map(|s| s.bounds()).collect();
+        let present: HashSet<StrokeId> = st.session.content.strokes.iter().map(|s| s.id).collect();
+        st.node_cache.retain(|id, _| present.contains(id));
+        st.bounds_rev = rev;
+    }
+
     fn erase_at(st: &mut State, wx: f64, wy: f64) {
         let radius = st.eraser_radius;
         let p = kurbo::Point::new(wx, wy);
@@ -1456,8 +1574,15 @@ impl CanvasView {
                 st.erase_path.push(p);
             }
         }
+        Self::ensure_bounds(st);
         let mut hits = Vec::new();
-        for s in &st.session.content.strokes {
+        for (i, s) in st.session.content.strokes.iter().enumerate() {
+            // Cheap reject: point not within the stroke's (width-padded)
+            // bounds grown by the eraser radius.
+            match st.bounds.get(i).copied().flatten() {
+                Some(b) if b.inflate(radius, radius).contains(p) => {}
+                _ => continue,
+            }
             if st.live_erased.contains(&s.id) {
                 continue;
             }
@@ -1927,10 +2052,15 @@ impl CanvasView {
 
         // Committed strokes: cached node per stroke, culled by bounds.
         let live_simulate = st.live.as_ref().map(|l| l.simulate_pressure);
-        let strokes: Vec<(StrokeId, Option<kurbo::Rect>)> =
-            st.session.content.strokes.iter().map(|s| (s.id, s.bounds())).collect();
-        let present: std::collections::HashSet<StrokeId> = strokes.iter().map(|(id, _)| *id).collect();
-        st.node_cache.retain(|id, _| present.contains(id));
+        Self::ensure_bounds(&mut st);
+        let strokes: Vec<(StrokeId, Option<kurbo::Rect>)> = st
+            .session
+            .content
+            .strokes
+            .iter()
+            .zip(st.bounds.iter())
+            .map(|(s, b)| (s.id, *b))
+            .collect();
         for (id, bounds) in strokes {
             let Some(bounds) = bounds else { continue };
             if bounds.intersect(visible).is_zero_area() {

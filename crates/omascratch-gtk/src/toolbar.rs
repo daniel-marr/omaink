@@ -341,33 +341,48 @@ fn text_glyph() -> gtk::DrawingArea {
     area
 }
 
-/// Hand (pan) icon: a simple mitten-style hand.
+/// Hand (pan) icon: an open-palm outline, after Lucide's `hand` icon (ISC),
+/// traced on its 24-unit grid.
 fn hand_glyph() -> gtk::DrawingArea {
+    use std::f64::consts::PI;
     let area = gtk::DrawingArea::new();
     area.set_content_width(22);
     area.set_content_height(22);
     area.set_halign(gtk::Align::Center);
     area.set_valign(gtk::Align::Center);
     area.set_draw_func(|_, cr, w, h| {
-        let w = w as f64;
-        let h = h as f64;
+        let k = (w.min(h) as f64) / 24.0;
+        cr.scale(k, k);
         cr.set_source_rgb(0.78, 0.82, 0.96);
-        // Palm.
-        rounded_rect(cr, w * 0.26, h * 0.42, w * 0.46, h * 0.40, 5.0);
-        let _ = cr.fill();
-        // Four fingers.
-        for (i, (fx, fh)) in [(0.28, 0.26), (0.40, 0.18), (0.52, 0.16), (0.64, 0.24)].iter().enumerate() {
-            let _ = i;
-            rounded_rect(cr, w * fx, h * fh, w * 0.10, h * (0.42 - fh) + h * 0.06, 2.5);
-            let _ = cr.fill();
-        }
-        // Thumb.
-        let _ = cr.save();
-        cr.translate(w * 0.20, h * 0.58);
-        cr.rotate(0.6);
-        rounded_rect(cr, -w * 0.05, -h * 0.05, w * 0.11, h * 0.26, 2.5);
-        let _ = cr.fill();
-        let _ = cr.restore();
+        cr.set_line_width(1.8);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+        // Ring, middle and index fingers.
+        cr.move_to(18.0, 11.0);
+        cr.line_to(18.0, 6.0);
+        cr.arc_negative(16.0, 6.0, 2.0, 0.0, -PI);
+        cr.new_sub_path();
+        cr.move_to(14.0, 10.0);
+        cr.line_to(14.0, 4.0);
+        cr.arc_negative(12.0, 4.0, 2.0, 0.0, -PI);
+        cr.line_to(10.0, 6.0);
+        cr.new_sub_path();
+        cr.move_to(10.0, 10.5);
+        cr.line_to(10.0, 6.0);
+        cr.arc_negative(8.0, 6.0, 2.0, 0.0, -PI);
+        cr.line_to(6.0, 14.0);
+        // Little finger, palm and thumb.
+        cr.new_sub_path();
+        cr.move_to(18.0, 8.0);
+        cr.arc(20.0, 8.0, 2.0, PI, 2.0 * PI);
+        cr.line_to(22.0, 14.0);
+        cr.arc(14.0, 14.0, 8.0, 0.0, PI / 2.0);
+        cr.line_to(12.0, 22.0);
+        cr.curve_to(9.2, 22.0, 7.5, 21.14, 6.01, 19.66);
+        cr.line_to(2.41, 16.06);
+        cr.arc(3.825, 14.65, 2.0, 0.75 * PI, 1.75 * PI);
+        cr.line_to(7.0, 15.0);
+        let _ = cr.stroke();
     });
     area
 }

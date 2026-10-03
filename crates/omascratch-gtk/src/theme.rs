@@ -48,11 +48,18 @@ fn with_alpha(c: Rgba, a: f32) -> gtk::gdk::RGBA {
 }
 
 fn canvas_palette(p: &Palette) -> CanvasPalette {
+    // A light page is always pure white (#ffffff): the inverted page on dark
+    // themes, and the normal page on light themes. A light theme's inverted
+    // page stays dark (its brightest ink color).
+    let white = gtk::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0);
+    let (bg, bg_inv) = if p.dark {
+        (gdk(p.background), white)
+    } else {
+        (white, gdk(p.bright_foreground))
+    };
     CanvasPalette {
-        bg: gdk(p.background),
-        // Inverted page: swap the page and the brightest ink. This works for
-        // light themes too (there the "inverted" page becomes dark).
-        bg_inv: gdk(p.bright_foreground),
+        bg,
+        bg_inv,
         ink: gdk(p.bright_foreground),
         ink_inv: gdk(p.background),
         accent: gdk(p.accent),

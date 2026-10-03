@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 // M1 fixed palette (Tokyo Night-ish). Replaced by the Omarchy theme adapter in M5.
 const BG: gdk::RGBA = gdk::RGBA::new(0.102, 0.106, 0.149, 1.0);
-const BG_LIGHT: gdk::RGBA = gdk::RGBA::new(0.925, 0.93, 0.955, 1.0);
+const BG_LIGHT: gdk::RGBA = gdk::RGBA::new(1.0, 1.0, 1.0, 1.0);
 const INK: gdk::RGBA = gdk::RGBA::new(0.753, 0.792, 0.961, 1.0);
 const INK_DARK: gdk::RGBA = gdk::RGBA::new(0.14, 0.15, 0.22, 1.0);
 const ACCENT: gdk::RGBA = gdk::RGBA::new(0.478, 0.635, 0.968, 1.0);
@@ -2048,7 +2048,10 @@ impl CanvasView {
             if st.background.kind != BackgroundKind::None {
                 let first = (visible.y0 / spacing).floor() as i64;
                 let last = (visible.y1 / spacing).ceil() as i64;
-                for k in first..=last {
+                // Ruled paper has a double-height header line: the first rule
+                // sits at 2x spacing. Grid paper stays uniform.
+                let min_k = if st.background.kind == BackgroundKind::Rules { 2 } else { i64::MIN };
+                for k in first.max(min_k)..=last {
                     let y = k as f64 * spacing;
                     pb.move_to(visible.x0 as f32, y as f32);
                     pb.line_to(visible.x1 as f32, y as f32);

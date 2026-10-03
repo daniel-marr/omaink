@@ -879,7 +879,7 @@ impl Toolbar {
                 }
             })
         };
-        let has_target = canvas.has_text_target_for_lists();
+        let has_target = canvas.text_has_target();
         for (b, f) in &toggles {
             let c = canvas.clone();
             let f = *f;
@@ -902,7 +902,15 @@ impl Toolbar {
             let list_btns = list_btns.clone();
             Rc::new(move || {
                 let cur = canvas.text_list_kind();
+                let target = canvas.text_has_target();
+                if std::env::var_os("OMASCRATCH_DEBUG_TEXT").is_some() {
+                    eprintln!(
+                        "[text] lists: editing={} target={target} kind={cur:?}",
+                        canvas.is_editing_text()
+                    );
+                }
                 for (b, k) in list_btns.borrow().iter() {
+                    b.set_sensitive(target);
                     set_selected_css(b, cur == Some(*k));
                 }
             })
@@ -918,9 +926,11 @@ impl Toolbar {
             list_btns.borrow_mut().push((b.clone(), k));
             let c = canvas.clone();
             let r = refresh_lists.clone();
+            let rs = refresh.clone();
             b.connect_clicked(move |_| {
                 c.text_list(k);
                 r();
+                rs();
             });
             lrow.append(&b);
         }
@@ -977,10 +987,14 @@ impl Toolbar {
         mark_selected(&swatches, canvas.text_style_state().color);
 
         popover.set_child(Some(&vbox));
-        popover.connect_closed(|p| {
-            let p = p.clone();
-            glib::idle_add_local_once(move || p.unparent());
-        });
+        {
+            let c = canvas.clone();
+            popover.connect_closed(move |p| {
+                c.focus_text_editor();
+                let p = p.clone();
+                glib::idle_add_local_once(move || p.unparent());
+            });
+        }
         popover.popup();
     }
 

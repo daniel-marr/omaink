@@ -975,16 +975,20 @@ impl CanvasView {
     // typed text), selected text boxes (whole boxes, one undo step), or —
     // with neither — the defaults for new text.
 
+    /// Give keyboard focus back to the open text editor (after the text
+    /// flyout closes; grabbing it while the flyout is open dismisses it).
+    pub fn focus_text_editor(&self) {
+        if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
+            ed.view.grab_focus();
+        }
+    }
+
     fn selected_texts(&self) -> Vec<TextBox> {
         let st = self.imp().state.borrow();
         st.session.content.texts.iter().filter(|t| st.sel_texts.contains(&t.id)).cloned().collect()
     }
 
     /// True when list/size changes have something to act on.
-    pub fn has_text_target_for_lists(&self) -> bool {
-        self.text_has_target()
-    }
-
     pub fn text_has_target(&self) -> bool {
         self.is_editing_text() || !self.imp().state.borrow().sel_texts.is_empty()
     }
@@ -1053,7 +1057,6 @@ impl CanvasView {
         use textmod::Fmt;
         if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
             ed.toggle(f);
-            ed.view.grab_focus();
             self.schedule_checkpoint();
             return;
         }
@@ -1094,7 +1097,6 @@ impl CanvasView {
         self.imp().state.borrow_mut().text_defaults.color = color;
         if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
             ed.set_color(color);
-            ed.view.grab_focus();
             self.schedule_checkpoint();
             return;
         }
@@ -1131,7 +1133,6 @@ impl CanvasView {
     pub fn text_list(&self, k: textmod::ListKind) {
         if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
             ed.toggle_list(k);
-            ed.view.grab_focus();
             self.schedule_checkpoint();
             return;
         }
@@ -1175,9 +1176,6 @@ impl CanvasView {
             };
             self.imp().state.borrow_mut().text_font_size = size;
             self.sync_editor_geometry(true);
-            if let Some(ed) = self.editor() {
-                ed.view.grab_focus();
-            }
             self.schedule_checkpoint();
             return Some(size);
         }

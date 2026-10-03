@@ -21,7 +21,9 @@ pub const DEFAULT_WIDTH: f64 = 420.0;
 pub const LIST_INDENT_EM: f64 = 1.6;
 
 pub const MARK_BULLET: &str = "• ";
-pub const MARK_CHECK: &str = "☐ ";
+/// "◻" rather than "☐": ☐ falls back to fonts with a very deep descent,
+/// which would make checklist lines taller than the rule pitch.
+pub const MARK_CHECK: &str = "◻ ";
 pub const MARK_CHECKED: &str = "☑ ";
 
 pub fn highlight_rgba() -> gdk::RGBA {
@@ -892,9 +894,40 @@ impl TextEditor {
              textview.oma-text-editor {{ outline: 1px dashed {border}; outline-offset: 3px; }}
              textview.oma-text-editor text selection {{ background-color: {ac}; }}"
         ));
+        // Measure the line box the TextView will really use (it can exceed
+        // the font's ascent+descent), so lines land exactly on the rules.
+        let ctx = self.view.pango_context();
+        let layout = pango::Layout::new(&ctx);
+        layout.set_font_description(Some(&font_for(&ctx, font_px)));
+        layout.set_text("Ag");
+        // (ascent, descent) of the laid-out line for `t`.
+        let line_ad = |t: &str| {
+            layout.set_text(t);
+            let h = layout.extents().1.height() as f64 / pango::SCALE as f64;
+            let base = layout.baseline() as f64 / pango::SCALE as f64;
+            (base, h - base)
+        };
+        let (body_a, body_d) = line_ad("Ag");
+        let body_h = (body_a + body_d).max(natural_px);
+        // Marker glyphs (☐/☑) are often missing from the UI font; a fallback
+        // font with a taller ascent or descent would push list lines apart
+        // while editing. Shrink markers until they fit inside the body line.
+        let scale = [MARK_BULLET, MARK_CHECK, MARK_CHECKED, "8. "]
+            .iter()
+            .map(|m| {
+                let (a, d) = line_ad(m);
+                let fa = if a > body_a && a > 0.0 { body_a / a } else { 1.0 };
+                let fd = if d > body_d && d > 0.0 { body_d / d } else { 1.0 };
+                fa.min(fd)
+            })
+            .fold(1.0, f64::min);
+        self.marker.set_scale(scale);
+        if std::env::var_os("OMASCRATCH_DEBUG_TEXT").is_some() {
+            eprintln!("[text] restyle: font={font_px:.1} natural={natural_px:.1} body={body_h:.2} marker_scale={scale:.2}");
+        }
         // Each visual line gets the leftover cell space ABOVE it, so the
         // baseline lands where the canvas puts it (cell bottom - descent).
-        let extra = (cell_px - natural_px).max(0.0).round() as i32;
+        let extra = (cell_px - body_h).max(0.0).round() as i32;
         self.view.set_pixels_above_lines(extra);
         self.view.set_pixels_inside_wrap(extra);
         self.view.set_pixels_below_lines(0);
@@ -1066,6 +1099,47 @@ mod tests {
             ed.buffer.insert_interactive(&mut it, "milk", true);
             let paras = ed.to_paras();
             assert_eq!((paras[0].kind, paras[0].plain_text().as_str()), (ParaKind::Number, "milk"));
+        });
+    }
+
+    #[test]
+    fn editor_list_lines_follow_the_rule_pitch() {
+        gtk::test_synced(|| {
+            if gtk::init().is_err() {
+                return;
+            }
+            let ed = TextEditor::new();
+            let win = gtk::Window::new();
+            win.set_default_size(600, 600);
+            win.set_child(Some(&ed.view));
+            ed.view.set_size_request(420, -1);
+            ed.view.set_visible(true);
+            win.present();
+            let item = |k: ParaKind, t: &str| Paragraph { kind: k, spans: vec![span(t, false, false)] };
+            for (font, cell) in [(16.0, 44.0), (26.0, 44.0), (40.0, 88.0), (12.0, 24.0)] {
+                let mut b = tb(vec![
+                    item(ParaKind::Body, "plain"),
+                    item(ParaKind::Check { checked: false }, "todo"),
+                    item(ParaKind::Check { checked: true }, "done"),
+                    item(ParaKind::Bullet, "bullet"),
+                    item(ParaKind::Number, "number"),
+                ]);
+                b.font_size = font;
+                ed.load(&b);
+                let (a, d) = font_extents(&ed.view.pango_context(), font);
+                let black = gdk::RGBA::BLACK;
+                ed.restyle(font, cell, a + d, &black, &black);
+                for _ in 0..40 {
+                    glib::MainContext::default().iteration(false);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                let ys: Vec<i32> = (0..5)
+                    .map(|l| ed.view.line_yrange(&ed.buffer.iter_at_line(l).unwrap()).0)
+                    .collect();
+                let want: Vec<i32> = (0..5).map(|i| i * cell as i32).collect();
+                assert_eq!(ys, want, "font {font}: every line sits on the {cell}px rule pitch");
+            }
+            win.close();
         });
     }
 }

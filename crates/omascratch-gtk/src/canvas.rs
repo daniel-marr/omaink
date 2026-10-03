@@ -809,6 +809,9 @@ impl CanvasView {
         ed.view.set_margin_top(((y - offset.y) * zoom).max(0.0) as i32);
         ed.view.set_size_request((w * zoom).max(40.0) as i32, -1);
         ed.restyle(fs * zoom, cell * zoom, asc + desc, &color, &accent);
+        if std::env::var_os("OMASCRATCH_DEBUG_TEXT").is_some() {
+            eprintln!("[text] editor geometry: zoom={zoom:.3} font_px={:.1} cell_px={:.1} at=({:.0},{:.0}) w={:.0}", fs * zoom, cell * zoom, (x - offset.x) * zoom, (y - offset.y) * zoom, w * zoom);
+        }
     }
 
     /// Finish the current edit: one exact ReplaceTexts (add / change /

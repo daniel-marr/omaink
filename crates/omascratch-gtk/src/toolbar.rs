@@ -4,8 +4,8 @@
 //! Shapes ▾, Format Background ▾, ⋯ (the right-side group is stubbed until
 //! shapes/M5 land). One mode is active at a time across select/lasso/eraser/
 //! pens. Clicking the active pen or eraser chip opens its OneNote-style
-//! flyout (stroke preview, − dots +, Recent Colors, Colors grid, More Colors,
-//! Remove Pen / eraser types). The pen set persists in XDG state.
+//! flyout (stroke preview, − dots +, Recent Colors, Colors grid, Remove Pen /
+//! eraser types). The pen set persists in XDG state.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -1529,49 +1529,10 @@ impl Toolbar {
         vbox.append(&grid_box);
         mark_selected(&swatches, Some(cfg0.color));
 
-        vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-
-        // More Colors…
-        let more = gtk::Button::with_label("More Colors…");
-        more.add_css_class("flat");
-        if let Some(l) = more.child().and_downcast::<gtk::Label>() {
-            l.set_xalign(0.0);
-        }
-        {
-            let t = self.clone();
-            let cfg2 = cfg.clone();
-            let preview2 = preview.clone();
-            let trow2 = trow.clone();
-            let anchor2 = anchor.clone();
-            more.connect_clicked(move |_| {
-                let dialog = gtk::ColorDialog::new();
-                let window = anchor2.root().and_downcast::<gtk::Window>();
-                let t = t.clone();
-                let cfg2 = cfg2.clone();
-                let preview2 = preview2.clone();
-                let trow2 = trow2.clone();
-                glib::spawn_future_local(async move {
-                    if let Ok(rgba) =
-                        dialog.choose_rgba_future(window.as_ref(), Some(&rgba_of(&t.inner.canvas, cfg2.borrow().color))).await
-                    {
-                        let color = SemanticColor::Fixed(Rgba {
-                            r: rgba.red(),
-                            g: rgba.green(),
-                            b: rgba.blue(),
-                            a: rgba.alpha(),
-                        });
-                        cfg2.borrow_mut().color = color;
-                        t.push_recent(color);
-                        t.commit_pen(idx, &cfg2, &preview2);
-                        redraw_children(&trow2);
-                    }
-                });
-            });
-        }
-        vbox.append(&more);
 
         // Remove pen.
         if self.inner.pens.borrow().len() > 1 {
+            vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
             let remove = gtk::Button::with_label("Remove Pen");
             remove.add_css_class("flat");
             remove.add_css_class("destructive-action");

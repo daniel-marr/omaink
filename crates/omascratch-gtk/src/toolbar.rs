@@ -572,10 +572,6 @@ struct Inner {
     pan_btn: gtk::Button,
     shapes_btn: gtk::MenuButton,
     text_btn: gtk::Button,
-    /// Format controls, shown only while a text box is being edited.
-    fmt_group: gtk::Box,
-    fmt_toggles: [gtk::Button; 4],
-    fmt_size: gtk::Label,
 }
 
 #[derive(Clone)]
@@ -612,19 +608,8 @@ impl Toolbar {
         let text_btn = gtk::Button::new();
         text_btn.add_css_class("flat");
         text_btn.set_child(Some(&text_glyph()));
-        text_btn.set_tooltip_text(Some("Text (click the page to type)"));
-        let fmt_group = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        fmt_group.add_css_class("text-format-group");
-        fmt_group.set_visible(false);
-        let fmt_toggles = [
-            fmt_button("<b>B</b>", "Bold (Ctrl+B)"),
-            fmt_button("<i>I</i>", "Italic (Ctrl+I)"),
-            fmt_button("<u>U</u>", "Underline (Ctrl+U)"),
-            fmt_button("<span background=\"#fadf6b\" foreground=\"#1a1b26\"> ab </span>", "Highlight (Ctrl+Shift+H)"),
-        ];
-        let fmt_size = gtk::Label::new(Some("18"));
-        fmt_size.add_css_class("dim-label");
-        fmt_size.set_width_chars(3);
+        text_btn.set_tooltip_text(Some("Text — click the page to type; click again for text settings"));
+        text_btn.set_focus_on_click(false);
         let shapes_btn = gtk::MenuButton::new();
         shapes_btn.add_css_class("flat");
         shapes_btn.set_child(Some(&shapes_glyph()));
@@ -651,9 +636,6 @@ impl Toolbar {
             pan_btn: pan_btn.clone(),
             shapes_btn: shapes_btn.clone(),
             text_btn: text_btn.clone(),
-            fmt_group: fmt_group.clone(),
-            fmt_toggles: fmt_toggles.clone(),
-            fmt_size: fmt_size.clone(),
         });
         let tb = Toolbar { widget, inner };
 
@@ -734,6 +716,21 @@ impl Toolbar {
         tb.widget.append(&copy_btn);
         tb.widget.append(&paste_btn);
         tb.widget.append(&image_btn);
+        {
+            let t = tb.clone();
+            text_btn.connect_clicked(move |b| {
+                let editing = t.inner.canvas.is_editing_text();
+                if t.inner.mode.get() == Mode::Text || editing {
+                    if t.inner.mode.get() != Mode::Text {
+                        t.set_mode(Mode::Text);
+                    }
+                    t.open_text_flyout(b.clone().upcast());
+                } else {
+                    t.set_mode(Mode::Text);
+                }
+            });
+        }
+        tb.widget.append(&text_btn);
         tb.widget.append(&vsep());
 
         // Gallery: eraser chip first, then pens.
@@ -788,55 +785,7 @@ impl Toolbar {
             });
             tb.widget.append(&shapes_btn);
         }
-        // Text tool + its contextual format group.
-        {
-            let t = tb.clone();
-            text_btn.connect_clicked(move |_| t.set_mode(Mode::Text));
-            tb.widget.append(&text_btn);
 
-            use crate::text::{Fmt, ListKind};
-            for (btn, f) in fmt_toggles.iter().zip([Fmt::Bold, Fmt::Italic, Fmt::Underline, Fmt::Highlight]) {
-                let c = canvas.clone();
-                btn.connect_clicked(move |_| c.text_format(f));
-                fmt_group.append(btn);
-            }
-            fmt_group.append(&vsep());
-            for (label, tip, k) in [
-                ("•  ⋯", "Bulleted list", ListKind::Bullet),
-                ("1. ⋯", "Numbered list", ListKind::Number),
-                ("☐  ⋯", "Checklist (Ctrl+1)", ListKind::Check),
-            ] {
-                let b = fmt_button(label, tip);
-                let c = canvas.clone();
-                b.connect_clicked(move |_| c.text_list(k));
-                fmt_group.append(&b);
-            }
-            fmt_group.append(&vsep());
-            let smaller = fmt_button("A−", "Smaller text");
-            let larger = fmt_button("A+", "Larger text");
-            let c = canvas.clone();
-            let lbl = fmt_size.clone();
-            smaller.connect_clicked(move |_| {
-                if let Some(sz) = c.text_font_step(false) {
-                    lbl.set_text(&format!("{sz:.0}"));
-                }
-            });
-            let c = canvas.clone();
-            let lbl = fmt_size.clone();
-            larger.connect_clicked(move |_| {
-                if let Some(sz) = c.text_font_step(true) {
-                    lbl.set_text(&format!("{sz:.0}"));
-                }
-            });
-            fmt_group.append(&smaller);
-            fmt_group.append(&fmt_size);
-            fmt_group.append(&larger);
-            tb.widget.append(&fmt_group);
-
-            // Show/hide the group and reflect B/I/U/H at the cursor.
-            let t = tb.clone();
-            canvas.set_on_text_state(move |state| t.update_text_state(state));
-        }
         // Format Background ▾ — rule/grid lines, margin.
         let bg_btn = gtk::MenuButton::new();
         bg_btn.add_css_class("flat");
@@ -873,19 +822,127 @@ impl Toolbar {
         tb
     }
 
-    fn update_text_state(&self, state: Option<crate::text::StyleState>) {
-        match state {
-            None => self.inner.fmt_group.set_visible(false),
-            Some(st) => {
-                self.inner.fmt_group.set_visible(true);
-                for (b, on) in self.inner.fmt_toggles.iter().zip([st.bold, st.italic, st.underline, st.highlight]) {
+    /// Text settings flyout (same pattern as the pen flyout): style toggles,
+    /// lists, size and the color grid. Acts on the selection / next typed
+    /// text while editing, otherwise sets the defaults for new text.
+    fn open_text_flyout(&self, anchor: gtk::Widget) {
+        use crate::text::{Fmt, ListKind};
+        let canvas = self.inner.canvas.clone();
+        let popover = gtk::Popover::new();
+        popover.set_parent(&anchor);
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        vbox.set_margin_top(10);
+        vbox.set_margin_bottom(10);
+        vbox.set_margin_start(12);
+        vbox.set_margin_end(12);
+
+        // Style toggles.
+        vbox.append(&section_label("Style"));
+        let srow = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let toggles: Vec<(gtk::Button, Fmt)> = vec![
+            (fmt_button("<b>B</b>", "Bold (Ctrl+B)"), Fmt::Bold),
+            (fmt_button("<i>I</i>", "Italic (Ctrl+I)"), Fmt::Italic),
+            (fmt_button("<u>U</u>", "Underline (Ctrl+U)"), Fmt::Underline),
+            (
+                fmt_button("<span background=\"#fadf6b\" foreground=\"#1a1b26\"> ab </span>", "Highlight (Ctrl+Shift+H)"),
+                Fmt::Highlight,
+            ),
+        ];
+        let refresh = {
+            let canvas = canvas.clone();
+            let toggles: Vec<(gtk::Button, Fmt)> = toggles.iter().map(|(b, f)| (b.clone(), *f)).collect();
+            std::rc::Rc::new(move || {
+                let st = canvas.text_style_state();
+                for (b, f) in &toggles {
+                    let on = match f {
+                        Fmt::Bold => st.bold,
+                        Fmt::Italic => st.italic,
+                        Fmt::Underline => st.underline,
+                        Fmt::Highlight => st.highlight,
+                    };
                     set_active_css(b, on);
                 }
-                self.inner
-                    .fmt_size
-                    .set_text(&format!("{:.0}", self.inner.canvas.text_font_size()));
-            }
+            })
+        };
+        let editing = canvas.is_editing_text();
+        for (b, f) in &toggles {
+            b.set_sensitive(editing);
+            let c = canvas.clone();
+            let f = *f;
+            let r = refresh.clone();
+            b.connect_clicked(move |_| {
+                c.text_format(f);
+                r();
+            });
+            srow.append(b);
         }
+        refresh();
+        vbox.append(&srow);
+
+        // Lists.
+        vbox.append(&section_label("Lists"));
+        let lrow = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        for (label, tip, k) in [
+            ("•  ⋯", "Bulleted list", ListKind::Bullet),
+            ("1. ⋯", "Numbered list", ListKind::Number),
+            ("☐  ⋯", "Checklist (Ctrl+1)", ListKind::Check),
+        ] {
+            let b = fmt_button(label, tip);
+            b.set_sensitive(editing);
+            let c = canvas.clone();
+            b.connect_clicked(move |_| c.text_list(k));
+            lrow.append(&b);
+        }
+        vbox.append(&lrow);
+
+        // Size.
+        vbox.append(&section_label("Size"));
+        let zrow = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let smaller = fmt_button("A−", "Smaller");
+        let size_lbl = gtk::Label::new(Some(&format!("{:.0}", canvas.text_font_size())));
+        size_lbl.set_width_chars(3);
+        let larger = fmt_button("A+", "Larger");
+        for (b, up) in [(&smaller, false), (&larger, true)] {
+            let c = canvas.clone();
+            let l = size_lbl.clone();
+            b.connect_clicked(move |_| {
+                if let Some(sz) = c.text_font_step(up) {
+                    l.set_text(&format!("{sz:.0}"));
+                }
+            });
+        }
+        zrow.append(&smaller);
+        zrow.append(&size_lbl);
+        zrow.append(&larger);
+        vbox.append(&zrow);
+
+        // Colors (same grid as the pens). "Theme ink" clears the override.
+        vbox.append(&section_label("Color"));
+        let grid_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        for row in color_rows() {
+            let r = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            for (name, color) in row {
+                let b = gtk::Button::new();
+                b.add_css_class("flat");
+                b.add_css_class("swatch-btn");
+                b.set_focus_on_click(false);
+                b.set_child(Some(&color_swatch(rgba_of(&canvas, color), 22)));
+                b.set_tooltip_text(Some(name));
+                let c = canvas.clone();
+                let value = if color == SemanticColor::Foreground { None } else { Some(color) };
+                b.connect_clicked(move |_| c.text_set_color(value));
+                r.append(&b);
+            }
+            grid_box.append(&r);
+        }
+        vbox.append(&grid_box);
+
+        popover.set_child(Some(&vbox));
+        popover.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        popover.popup();
     }
 
     /// Switch to the Select tool (e.g. right after pasting an image).

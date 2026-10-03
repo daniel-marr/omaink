@@ -28,6 +28,9 @@ pub struct Span {
     pub underline: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub highlight: bool,
+    /// Per-span color; None = the box color (theme ink by default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<SemanticColor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -191,6 +191,8 @@ pub struct State {
     editing: Option<EditSession>,
     /// Font size for new text boxes (follows the last size used).
     text_font_size: f64,
+    /// Color for new text (None = theme ink).
+    text_color: Option<SemanticColor>,
     /// Shell hook: text editing state for the toolbar format group
     /// (None = not editing).
     on_text_state: Option<Box<dyn Fn(Option<textmod::StyleState>)>>,
@@ -265,6 +267,7 @@ impl Default for State {
             clipboard_texts: Vec::new(),
             editing: None,
             text_font_size: textmod::DEFAULT_FONT_SIZE,
+            text_color: None,
             on_text_state: None,
             sel_resize: None,
             marquee: None,
@@ -673,36 +676,6 @@ impl CanvasView {
         });
         ed.view.add_controller(keys);
 
-        // Focus leaving the editor finishes the edit (deferred: never inside
-        // the focus signal itself).
-        let focus = gtk::EventControllerFocus::new();
-        let weak = self.downgrade();
-        focus.connect_leave(move |_| {
-            let weak = weak.clone();
-            glib::idle_add_local_once(move || {
-                if let Some(v) = weak.upgrade() {
-                    let still_focused = v
-                        .imp()
-                        .editor
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|e| e.view.has_focus());
-                    if !still_focused {
-                        v.commit_text_edit();
-                    }
-                }
-            });
-        });
-        ed.view.add_controller(focus);
-
-        let weak = self.downgrade();
-        ed.set_on_state(move |st| {
-            if let Some(v) = weak.upgrade() {
-                if v.is_editing_text() {
-                    v.emit_text_state(Some(st));
-                }
-            }
-        });
         let weak = self.downgrade();
         ed.buffer.connect_changed(move |_| {
             if let Some(v) = weak.upgrade() {
@@ -743,10 +716,12 @@ impl CanvasView {
         let working = {
             let mut st = self.imp().state.borrow_mut();
             let fs = st.text_font_size;
+            // New boxes snap to the rule row under the click.
+            let row = st.background.spacing.max(8.0);
             let working = existing.clone().unwrap_or_else(|| TextBox {
                 id: TextId::new(),
                 x: at.x,
-                y: at.y - fs * 0.6,
+                y: (at.y / row).floor() * row,
                 w: textmod::DEFAULT_WIDTH,
                 h: fs * 1.2,
                 font_size: fs,
@@ -763,7 +738,12 @@ impl CanvasView {
             });
             working
         };
+        let is_new = self.imp().state.borrow().editing.as_ref().is_some_and(|e| e.original.is_none());
         ed.load(&working);
+        if is_new {
+            let color = self.imp().state.borrow().text_color;
+            ed.set_pending(textmod::StyleState { color, ..Default::default() });
+        }
         self.sync_editor_geometry(true);
         ed.view.set_visible(true);
         ed.view.grab_focus();
@@ -808,10 +788,17 @@ impl CanvasView {
             let color = resolve_color_inv(t.color, Tool::Pen, inverted, &palette);
             (t.x, t.y, t.w, t.font_size, offset, zoom, color, palette.accent)
         };
+        let (cell, resolver) = {
+            let st = self.imp().state.borrow();
+            (Self::text_cell(&st, fs), Self::text_resolver(&st))
+        };
+        let ctx = self.pango_context();
+        let (asc, desc) = textmod::font_extents(&ctx, fs * zoom);
+        ed.set_resolver(resolver);
         ed.view.set_margin_start(((x - offset.x) * zoom).max(0.0) as i32);
         ed.view.set_margin_top(((y - offset.y) * zoom).max(0.0) as i32);
         ed.view.set_size_request((w * zoom).max(40.0) as i32, -1);
-        ed.restyle(fs * zoom, &color, &accent);
+        ed.restyle(fs * zoom, cell * zoom, asc + desc, &color, &accent);
     }
 
     /// Finish the current edit: one exact ReplaceTexts (add / change /
@@ -827,7 +814,10 @@ impl CanvasView {
         working.paras = ed.to_paras();
         ed.view.set_visible(false);
         let ctx = self.pango_context();
-        working.h = textmod::layout_text(&ctx, &working).height;
+        working.h = {
+            let st = self.imp().state.borrow();
+            textmod::layout_text(&ctx, &working, Self::text_cell(&st, working.font_size), &Self::text_resolver(&st)).height
+        };
         let changed = {
             let mut st = self.imp().state.borrow_mut();
             st.text_font_size = working.font_size;
@@ -877,13 +867,16 @@ impl CanvasView {
         let Some(ed) = self.editor() else { return };
         let ctx = self.pango_context();
         let mut st = self.imp().state.borrow_mut();
+        let Some(font) = st.editing.as_ref().map(|e| e.working.font_size) else { return };
+        let cell = Self::text_cell(&st, font);
+        let resolver = Self::text_resolver(&st);
         let Some(sess) = st.editing.as_mut() else { return };
         let mut w = sess.working.clone();
         w.paras = ed.to_paras();
         if w.is_blank() || sess.original.as_ref() == Some(&w) {
             return;
         }
-        w.h = textmod::layout_text(&ctx, &w).height;
+        w.h = textmod::layout_text(&ctx, &w, cell, &resolver).height;
         let before: Vec<TextBox> = sess.original.clone().into_iter().collect();
         sess.original = Some(w.clone());
         sess.working = w.clone();
@@ -952,7 +945,7 @@ impl CanvasView {
             .collect();
         for tb in candidates {
             if !st.text_layouts.contains_key(&tb.id) {
-                let tl = textmod::layout_text(&ctx, &tb);
+                let tl = textmod::layout_text(&ctx, &tb, Self::text_cell(&st, tb.font_size), &Self::text_resolver(&st));
                 st.text_layouts.insert(tb.id, tl);
             }
             let hit = st.text_layouts[&tb.id]
@@ -984,6 +977,26 @@ impl CanvasView {
         }
     }
 
+    /// Style at the cursor while editing; defaults otherwise.
+    pub fn text_style_state(&self) -> textmod::StyleState {
+        if self.is_editing_text() {
+            if let Some(ed) = self.editor() {
+                return ed.current_style();
+            }
+        }
+        textmod::StyleState { color: self.imp().state.borrow().text_color, ..Default::default() }
+    }
+
+    /// Color the selection / next typed text; also the default for new text.
+    pub fn text_set_color(&self, color: Option<SemanticColor>) {
+        self.imp().state.borrow_mut().text_color = color;
+        if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
+            ed.set_color(color);
+            ed.view.grab_focus();
+            self.schedule_checkpoint();
+        }
+    }
+
     pub fn text_list(&self, k: textmod::ListKind) {
         if let (true, Some(ed)) = (self.is_editing_text(), self.editor()) {
             ed.toggle_list(k);
@@ -996,14 +1009,15 @@ impl CanvasView {
         const SIZES: [f64; 11] = [10.0, 12.0, 14.0, 16.0, 18.0, 22.0, 26.0, 32.0, 40.0, 48.0, 64.0];
         let size = {
             let mut st = self.imp().state.borrow_mut();
-            let sess = st.editing.as_mut()?;
-            let cur = sess.working.font_size;
+            let cur = st.editing.as_ref().map(|e| e.working.font_size).unwrap_or(st.text_font_size);
             let next = if up {
                 SIZES.iter().copied().find(|s| *s > cur + 0.01).unwrap_or(cur)
             } else {
                 SIZES.iter().rev().copied().find(|s| *s < cur - 0.01).unwrap_or(cur)
             };
-            sess.working.font_size = next;
+            if let Some(sess) = st.editing.as_mut() {
+                sess.working.font_size = next;
+            }
             next
         };
         self.imp().state.borrow_mut().text_font_size = size;
@@ -1041,7 +1055,9 @@ impl CanvasView {
     // ---- tool selection (driven by the draw toolbar) ----
 
     pub fn set_active_tool(&self, tool: ActiveTool) {
-        self.commit_text_edit();
+        if tool != ActiveTool::Text {
+            self.commit_text_edit();
+        }
         self.imp().state.borrow_mut().active = tool;
     }
 
@@ -1071,6 +1087,7 @@ impl CanvasView {
         let mut st = self.imp().state.borrow_mut();
         st.palette = palette;
         st.node_cache.clear();
+        st.text_layouts.clear();
         drop(st);
         self.queue_draw();
     }
@@ -1090,6 +1107,7 @@ impl CanvasView {
         if st.inverted != inverted {
             st.inverted = inverted;
             st.node_cache.clear();
+            st.text_layouts.clear();
             drop(st);
             self.queue_draw();
         }
@@ -1100,7 +1118,12 @@ impl CanvasView {
     }
 
     pub fn set_background(&self, bg: PageBackground) {
-        self.imp().state.borrow_mut().background = bg;
+        {
+            let mut st = self.imp().state.borrow_mut();
+            st.background = bg;
+            st.text_layouts.clear();
+        }
+        self.sync_editor_geometry(true);
         self.queue_draw();
     }
 
@@ -2038,6 +2061,17 @@ impl CanvasView {
         out
     }
 
+    /// Line pitch for text on this page (rule spacing multiples).
+    fn text_cell(st: &State, font: f64) -> f64 {
+        textmod::cell_height(st.background.spacing, font)
+    }
+
+    /// Semantic → screen color for text on the current page.
+    fn text_resolver(st: &State) -> impl Fn(SemanticColor) -> gdk::RGBA {
+        let (inverted, palette) = (st.inverted, st.palette);
+        move |c| resolve_color_inv(c, Tool::Pen, inverted, &palette)
+    }
+
     /// Topmost text box under a world point (excluding the one being edited).
     fn text_at(st: &State, wp: kurbo::Point) -> Option<TextId> {
         let editing = st.editing.as_ref().map(|e| e.working.id);
@@ -2692,7 +2726,7 @@ impl CanvasView {
                 continue;
             }
             if !st.text_layouts.contains_key(&tb.id) {
-                let tl = textmod::layout_text(&ctx, tb);
+                let tl = textmod::layout_text(&ctx, tb, Self::text_cell(&st, tb.font_size), &Self::text_resolver(&st));
                 st.text_layouts.insert(tb.id, tl);
             }
             let color = resolve_color_inv(tb.color, Tool::Pen, st.inverted, &st.palette);

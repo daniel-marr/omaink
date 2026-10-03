@@ -687,6 +687,7 @@ impl Sidebar {
             ("Scroll / middle-drag", "Pan"),
             ("Ctrl+Scroll", "Zoom"),
             ("Text tool: click the page", "New text box (click a box to edit)"),
+            ("Click T again", "Text settings: style, size, color, lists"),
             ("Double-click a text box", "Edit it (in Select)"),
             ("Ctrl+B / I / U", "Bold / italic / underline"),
             ("Ctrl+Shift+H", "Highlight"),

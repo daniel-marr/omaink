@@ -1,23 +1,24 @@
 //! Text boxes in the GTK shell: Pango layout + rendering on the canvas, and
 //! the in-place rich-text editor (a GtkTextView overlaid on the canvas).
 //!
+//! Line metrics follow the page: every text line occupies a whole number of
+//! rule cells (the page's rule spacing) and baselines sit on the rule lines,
+//! both on the canvas and in the editor, so typed and rendered text match.
+//!
 //! Model ↔ editor mapping: list markers are literal, non-editable text at the
-//! start of a line ("• ", "1. ", "☐ ", "☑ ") so the editor needs no custom
-//! widgets; styles are text tags (bold, italic, underline, highlight).
+//! start of a line ("• ", "1. ", "☐ ", "☑ "); styles and colors are tags.
 
 use std::cell::{Cell, RefCell};
 
 use gtk4 as gtk;
 use gtk4::{gdk, glib, graphene, gsk, pango, prelude::*};
 
-use omascratch_core::{ParaKind, Paragraph, Span, TextBox};
+use omascratch_core::{ParaKind, Paragraph, SemanticColor, Span, TextBox};
 
 pub const DEFAULT_FONT_SIZE: f64 = 18.0;
 pub const DEFAULT_WIDTH: f64 = 420.0;
 /// Hanging indent for list paragraphs, in font sizes.
-const LIST_INDENT_EM: f64 = 1.6;
-/// Extra space after each paragraph, in font sizes.
-const PARA_GAP_EM: f64 = 0.25;
+pub const LIST_INDENT_EM: f64 = 1.6;
 
 pub const MARK_BULLET: &str = "• ";
 pub const MARK_CHECK: &str = "☐ ";
@@ -25,6 +26,28 @@ pub const MARK_CHECKED: &str = "☑ ";
 
 pub fn highlight_rgba() -> gdk::RGBA {
     gdk::RGBA::new(0.98, 0.86, 0.33, 0.55)
+}
+
+/// Line pitch for a font on a page with rule spacing `spacing`: a whole
+/// number of rule cells, enough for the font.
+pub fn cell_height(spacing: f64, font: f64) -> f64 {
+    let s = spacing.max(8.0);
+    s * ((font * 1.3) / s).ceil().max(1.0)
+}
+
+fn font_for(ctx: &pango::Context, size: f64) -> pango::FontDescription {
+    let mut fd = ctx.font_description().unwrap_or_default();
+    fd.set_absolute_size(size * pango::SCALE as f64);
+    fd
+}
+
+/// (ascent, descent) for the context's font at `size`, in the same units.
+pub fn font_extents(ctx: &pango::Context, size: f64) -> (f64, f64) {
+    let m = ctx.metrics(Some(&font_for(ctx, size)), None);
+    (
+        m.ascent() as f64 / pango::SCALE as f64,
+        m.descent() as f64 / pango::SCALE as f64,
+    )
 }
 
 // ---------------------------------------------------------------- layout --
@@ -42,8 +65,10 @@ pub struct ParaLayout {
     pub indent: f64,
     pub prefix: Prefix,
     pub layout: pango::Layout,
-    /// First-line height (for vertically centering markers).
-    pub line_h: f64,
+    /// Vertical offset applied to the layout so its baselines sit on rules.
+    pub shift: f64,
+    /// First line's baseline, relative to the box origin.
+    pub baseline: f64,
 }
 
 pub struct TextLayout {
@@ -54,30 +79,32 @@ pub struct TextLayout {
 impl TextLayout {
     /// Checkbox hit rects relative to the box origin: (paragraph index, rect).
     pub fn check_rects(&self, font_size: f64) -> Vec<(usize, kurbo::Rect)> {
-        let s = font_size * 0.8;
+        let s = font_size * 0.75;
         self.paras
             .iter()
             .enumerate()
             .filter_map(|(i, p)| match p.prefix {
-                Prefix::Check(_) => {
-                    let y = p.y + (p.line_h - s) / 2.0;
-                    Some((i, kurbo::Rect::new(0.0, y, s, y + s)))
-                }
+                Prefix::Check(_) => Some((i, kurbo::Rect::new(0.0, p.baseline - s, s, p.baseline))),
                 _ => None,
             })
             .collect()
     }
 }
 
-fn font_for(ctx: &pango::Context, size: f64) -> pango::FontDescription {
-    let mut fd = ctx.font_description().unwrap_or_default();
-    fd.set_absolute_size(size * pango::SCALE as f64);
-    fd
+fn rgba_u16(c: &gdk::RGBA) -> (u16, u16, u16) {
+    ((c.red() * 65535.0) as u16, (c.green() * 65535.0) as u16, (c.blue() * 65535.0) as u16)
 }
 
-/// Lay out a text box in world units (font size is absolute world units).
-pub fn layout_text(ctx: &pango::Context, tb: &TextBox) -> TextLayout {
+/// Lay out a text box in world units. `cell` is the line pitch (see
+/// `cell_height`); `resolve` maps semantic span colors to screen colors.
+pub fn layout_text(
+    ctx: &pango::Context,
+    tb: &TextBox,
+    cell: f64,
+    resolve: &dyn Fn(SemanticColor) -> gdk::RGBA,
+) -> TextLayout {
     let fd = font_for(ctx, tb.font_size);
+    let (_, descent) = font_extents(ctx, tb.font_size);
     let mut paras = Vec::with_capacity(tb.paras.len());
     let mut y = 0.0;
     let mut number = 0u32;
@@ -107,6 +134,8 @@ pub fn layout_text(ctx: &pango::Context, tb: &TextBox) -> TextLayout {
 
         let mut text = String::new();
         let attrs = pango::AttrList::new();
+        // Uniform line pitch = rule cell.
+        attrs.insert(pango::AttrInt::new_line_height_absolute((cell * pango::SCALE as f64) as i32));
         for span in &p.spans {
             let start = text.len() as u32;
             text.push_str(&span.text);
@@ -114,61 +143,48 @@ pub fn layout_text(ctx: &pango::Context, tb: &TextBox) -> TextLayout {
             if start == end {
                 continue;
             }
-            if span.bold {
-                let mut a = pango::AttrInt::new_weight(pango::Weight::Bold);
+            let add = |mut a: pango::Attribute| {
                 a.set_start_index(start);
                 a.set_end_index(end);
                 attrs.insert(a);
+            };
+            if span.bold {
+                add(pango::AttrInt::new_weight(pango::Weight::Bold).into());
             }
             if span.italic {
-                let mut a = pango::AttrInt::new_style(pango::Style::Italic);
-                a.set_start_index(start);
-                a.set_end_index(end);
-                attrs.insert(a);
+                add(pango::AttrInt::new_style(pango::Style::Italic).into());
             }
             if span.underline {
-                let mut a = pango::AttrInt::new_underline(pango::Underline::Single);
-                a.set_start_index(start);
-                a.set_end_index(end);
-                attrs.insert(a);
+                add(pango::AttrInt::new_underline(pango::Underline::Single).into());
             }
             if span.highlight {
                 let h = highlight_rgba();
-                let mut a = pango::AttrColor::new_background(
-                    (h.red() * 65535.0) as u16,
-                    (h.green() * 65535.0) as u16,
-                    (h.blue() * 65535.0) as u16,
-                );
-                a.set_start_index(start);
-                a.set_end_index(end);
-                attrs.insert(a);
-                let mut al = pango::AttrInt::new_background_alpha((h.alpha() * 65535.0) as u16);
-                al.set_start_index(start);
-                al.set_end_index(end);
-                attrs.insert(al);
+                let (r, g, b) = rgba_u16(&h);
+                add(pango::AttrColor::new_background(r, g, b).into());
+                add(pango::AttrInt::new_background_alpha((h.alpha() * 65535.0) as u16).into());
+            }
+            if let Some(c) = span.color {
+                let rgba = resolve(c);
+                let (r, g, b) = rgba_u16(&rgba);
+                add(pango::AttrColor::new_foreground(r, g, b).into());
             }
         }
         layout.set_text(&text);
         layout.set_attributes(Some(&attrs));
 
-        let (_, lh) = layout.size();
-        let height = (lh as f64 / pango::SCALE as f64).max(tb.font_size * 1.2);
-        let line_h = layout
-            .line_readonly(0)
-            .map(|l| {
-                let (_, logical) = l.extents();
-                logical.height() as f64 / pango::SCALE as f64
-            })
-            .unwrap_or(tb.font_size * 1.2)
-            .max(tb.font_size);
-        paras.push(ParaLayout { y, indent, prefix, layout, line_h });
-        y += height + tb.font_size * PARA_GAP_EM;
+        let lines = layout.line_count().max(1) as f64;
+        // Baseline of the first line sits on the bottom rule of its cell,
+        // leaving room for descenders.
+        let target_baseline = cell - descent;
+        let shift = target_baseline - layout.baseline() as f64 / pango::SCALE as f64;
+        paras.push(ParaLayout { y, indent, prefix, layout, shift, baseline: y + target_baseline });
+        y += lines * cell;
     }
-    let height = (y - tb.font_size * PARA_GAP_EM).max(tb.font_size * 1.2);
-    TextLayout { paras, height }
+    TextLayout { paras, height: y.max(cell) }
 }
 
 /// Draw a laid-out text box at (x, y) in the current (world) transform.
+/// `color` is the default text color (spans may override).
 pub fn draw_text(
     snapshot: &gtk::Snapshot,
     ctx: &pango::Context,
@@ -179,12 +195,12 @@ pub fn draw_text(
     color: &gdk::RGBA,
 ) {
     for p in &tl.paras {
-        let py = y + p.y;
+        let base = y + p.baseline;
         match p.prefix {
             Prefix::None => {}
             Prefix::Bullet => {
-                let r = font_size * 0.16;
-                let cy = py + p.line_h / 2.0;
+                let r = font_size * 0.15;
+                let cy = base - font_size * 0.33;
                 let pb = gsk::PathBuilder::new();
                 pb.add_circle(&graphene::Point::new((x + font_size * 0.55) as f32, cy as f32), r as f32);
                 snapshot.append_fill(&pb.to_path(), gsk::FillRule::Winding, color);
@@ -193,14 +209,15 @@ pub fn draw_text(
                 let l = pango::Layout::new(ctx);
                 l.set_font_description(Some(&font_for(ctx, font_size)));
                 l.set_text(&format!("{n}."));
+                let bl = l.baseline() as f64 / pango::SCALE as f64;
                 snapshot.save();
-                snapshot.translate(&graphene::Point::new(x as f32, py as f32));
+                snapshot.translate(&graphene::Point::new(x as f32, (base - bl) as f32));
                 snapshot.append_layout(&l, color);
                 snapshot.restore();
             }
             Prefix::Check(checked) => {
-                let s = font_size * 0.8;
-                let by = py + (p.line_h - s) / 2.0;
+                let s = font_size * 0.75;
+                let by = base - s;
                 let pb = gsk::PathBuilder::new();
                 pb.add_rect(&graphene::Rect::new(x as f32, by as f32, s as f32, s as f32));
                 let stroke = gsk::Stroke::new((font_size * 0.08).max(1.0) as f32);
@@ -218,7 +235,7 @@ pub fn draw_text(
             }
         }
         snapshot.save();
-        snapshot.translate(&graphene::Point::new((x + p.indent) as f32, py as f32));
+        snapshot.translate(&graphene::Point::new((x + p.indent) as f32, (y + p.y + p.shift) as f32));
         snapshot.append_layout(&p.layout, color);
         snapshot.restore();
     }
@@ -241,13 +258,17 @@ pub enum ListKind {
     Check,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StyleState {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
     pub highlight: bool,
+    /// None = default box color.
+    pub color: Option<SemanticColor>,
 }
+
+type Resolver = Box<dyn Fn(SemanticColor) -> gdk::RGBA>;
 
 pub struct TextEditor {
     pub view: gtk::TextView,
@@ -258,12 +279,14 @@ pub struct TextEditor {
     highlight: gtk::TextTag,
     marker: gtk::TextTag,
     list: gtk::TextTag,
+    /// One tag per span color in use.
+    color_tags: RefCell<Vec<(SemanticColor, gtk::TextTag)>>,
+    resolver: RefCell<Option<Resolver>>,
     /// Explicit style for the next typed text (toggled with no selection).
     pending: Cell<Option<StyleState>>,
     /// True while we mutate the buffer ourselves (suppress style inheritance).
     internal: Cell<bool>,
     css: gtk::CssProvider,
-    on_state: RefCell<Option<Box<dyn Fn(StyleState)>>>,
 }
 
 impl TextEditor {
@@ -273,6 +296,10 @@ impl TextEditor {
         let view = gtk::TextView::with_buffer(&buffer);
         view.set_wrap_mode(gtk::WrapMode::WordChar);
         view.set_accepts_tab(false);
+        view.set_top_margin(0);
+        view.set_bottom_margin(0);
+        view.set_left_margin(0);
+        view.set_right_margin(0);
         view.add_css_class("oma-text-editor");
         view.set_halign(gtk::Align::Start);
         view.set_valign(gtk::Align::Start);
@@ -291,11 +318,7 @@ impl TextEditor {
 
         let css = gtk::CssProvider::new();
         if let Some(display) = gdk::Display::default() {
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &css,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
-            );
+            gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
         }
 
         let ed = std::rc::Rc::new(TextEditor {
@@ -307,10 +330,11 @@ impl TextEditor {
             highlight,
             marker,
             list,
+            color_tags: RefCell::new(Vec::new()),
+            resolver: RefCell::new(None),
             pending: Cell::new(None),
             internal: Cell::new(false),
             css,
-            on_state: RefCell::new(None),
         });
 
         // Newly typed text takes the pending style, else the style of the
@@ -339,19 +363,18 @@ impl TextEditor {
                 None
             });
         }
-        // Report the style at the cursor (toolbar B/I/U/H state).
+        // Moving the cursor drops a pending (not yet typed) style.
         {
             let weak = std::rc::Rc::downgrade(&ed);
             ed.buffer.connect_mark_set(move |_, _, mark| {
                 if let Some(ed) = weak.upgrade() {
-                    if mark.name().as_deref() == Some("insert") {
+                    if mark.name().as_deref() == Some("insert") && !ed.internal.get() {
                         ed.pending.set(None);
-                        ed.emit_state();
                     }
                 }
             });
         }
-        // List-aware Return and Backspace.
+        // List-aware Return/Backspace and style shortcuts.
         {
             let weak = std::rc::Rc::downgrade(&ed);
             let keys = gtk::EventControllerKey::new();
@@ -360,55 +383,64 @@ impl TextEditor {
                 let Some(ed) = weak.upgrade() else { return glib::Propagation::Proceed };
                 let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
                 let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
-                match key {
-                    gdk::Key::Return | gdk::Key::KP_Enter if !shift => {
-                        if ed.list_return() {
-                            return glib::Propagation::Stop;
-                        }
-                    }
-                    gdk::Key::BackSpace if !ctrl => {
-                        if ed.list_backspace() {
-                            return glib::Propagation::Stop;
-                        }
-                    }
+                let handled = match key {
+                    gdk::Key::Return | gdk::Key::KP_Enter if !shift => ed.list_return(),
+                    gdk::Key::BackSpace if !ctrl => ed.list_backspace(),
                     gdk::Key::b if ctrl => {
                         ed.toggle(Fmt::Bold);
-                        return glib::Propagation::Stop;
+                        true
                     }
                     gdk::Key::i if ctrl => {
                         ed.toggle(Fmt::Italic);
-                        return glib::Propagation::Stop;
+                        true
                     }
                     gdk::Key::u if ctrl => {
                         ed.toggle(Fmt::Underline);
-                        return glib::Propagation::Stop;
+                        true
                     }
                     gdk::Key::H | gdk::Key::h if ctrl && shift => {
                         ed.toggle(Fmt::Highlight);
-                        return glib::Propagation::Stop;
+                        true
                     }
                     gdk::Key::_1 if ctrl => {
                         ed.cycle_check();
-                        return glib::Propagation::Stop;
+                        true
                     }
-                    _ => {}
+                    _ => false,
+                };
+                if handled {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
                 }
-                glib::Propagation::Proceed
             });
             ed.view.add_controller(keys);
         }
         ed
     }
 
-    pub fn set_on_state(&self, f: impl Fn(StyleState) + 'static) {
-        *self.on_state.borrow_mut() = Some(Box::new(f));
+    /// How semantic span colors look right now (palette + page polarity).
+    pub fn set_resolver(&self, f: impl Fn(SemanticColor) -> gdk::RGBA + 'static) {
+        *self.resolver.borrow_mut() = Some(Box::new(f));
+        let tags = self.color_tags.borrow();
+        if let Some(r) = self.resolver.borrow().as_ref() {
+            for (c, t) in tags.iter() {
+                t.set_foreground_rgba(Some(&r(*c)));
+            }
+        }
     }
 
-    fn emit_state(&self) {
-        let st = self.current_style();
-        if let Some(cb) = self.on_state.borrow().as_ref() {
-            cb(st);
+    fn color_tag(&self, c: SemanticColor) -> gtk::TextTag {
+        if let Some((_, t)) = self.color_tags.borrow().iter().find(|(k, _)| *k == c) {
+            return t.clone();
         }
+        let tag = gtk::TextTag::new(None);
+        if let Some(r) = self.resolver.borrow().as_ref() {
+            tag.set_foreground_rgba(Some(&r(c)));
+        }
+        self.buffer.tag_table().add(&tag);
+        self.color_tags.borrow_mut().push((c, tag.clone()));
+        tag
     }
 
     /// Style the toolbar should show: pending override, else the selection
@@ -428,12 +460,24 @@ impl TextEditor {
         }
     }
 
+    /// Set the style for the next typed text (e.g. a new box's defaults).
+    pub fn set_pending(&self, st: StyleState) {
+        self.pending.set(Some(st));
+    }
+
     fn style_at(&self, it: &gtk::TextIter) -> StyleState {
+        let color = self
+            .color_tags
+            .borrow()
+            .iter()
+            .find(|(_, t)| it.has_tag(t))
+            .map(|(c, _)| *c);
         StyleState {
             bold: it.has_tag(&self.bold),
             italic: it.has_tag(&self.italic),
             underline: it.has_tag(&self.underline),
             highlight: it.has_tag(&self.highlight),
+            color,
         }
     }
 
@@ -450,6 +494,18 @@ impl TextEditor {
                 self.buffer.remove_tag(tag, start, end);
             }
         }
+        self.apply_color(start, end, st.color);
+    }
+
+    fn apply_color(&self, start: &gtk::TextIter, end: &gtk::TextIter, color: Option<SemanticColor>) {
+        let tags: Vec<gtk::TextTag> = self.color_tags.borrow().iter().map(|(_, t)| t.clone()).collect();
+        for t in &tags {
+            self.buffer.remove_tag(t, start, end);
+        }
+        if let Some(c) = color {
+            let t = self.color_tag(c);
+            self.buffer.apply_tag(&t, start, end);
+        }
     }
 
     fn tag_for(&self, f: Fmt) -> &gtk::TextTag {
@@ -465,7 +521,6 @@ impl TextEditor {
     pub fn toggle(&self, f: Fmt) {
         if let Some((s, e)) = self.buffer.selection_bounds() {
             let tag = self.tag_for(f);
-            // On if any selected char lacks it, else off.
             let mut it = s;
             let mut all = true;
             while it < e {
@@ -490,7 +545,17 @@ impl TextEditor {
             }
             self.pending.set(Some(st));
         }
-        self.emit_state();
+    }
+
+    /// Color the selection, or set it for the next typed text.
+    pub fn set_color(&self, color: Option<SemanticColor>) {
+        if let Some((s, e)) = self.buffer.selection_bounds() {
+            self.apply_color(&s, &e, color);
+        } else {
+            let mut st = self.current_style();
+            st.color = color;
+            self.pending.set(Some(st));
+        }
     }
 
     // -- model <-> buffer --
@@ -527,28 +592,32 @@ impl TextEditor {
                 self.buffer.insert_with_tags(&mut end, &m, &[&self.marker]);
             }
             for span in &p.spans {
-                let mut tags: Vec<&gtk::TextTag> = Vec::new();
+                let mut tags: Vec<gtk::TextTag> = Vec::new();
                 if span.bold {
-                    tags.push(&self.bold);
+                    tags.push(self.bold.clone());
                 }
                 if span.italic {
-                    tags.push(&self.italic);
+                    tags.push(self.italic.clone());
                 }
                 if span.underline {
-                    tags.push(&self.underline);
+                    tags.push(self.underline.clone());
                 }
                 if span.highlight {
-                    tags.push(&self.highlight);
+                    tags.push(self.highlight.clone());
                 }
+                if let Some(c) = span.color {
+                    tags.push(self.color_tag(c));
+                }
+                let refs: Vec<&gtk::TextTag> = tags.iter().collect();
                 let mut end = self.buffer.end_iter();
-                self.buffer.insert_with_tags(&mut end, &span.text, &tags);
+                self.buffer.insert_with_tags(&mut end, &span.text, &refs);
             }
         }
         self.retag_lists();
-        self.internal.set(false);
-        self.pending.set(None);
         let start = self.buffer.start_iter();
         self.buffer.place_cursor(&start);
+        self.internal.set(false);
+        self.pending.set(None);
     }
 
     fn line_bounds(&self, line: i32) -> Option<(gtk::TextIter, gtk::TextIter)> {
@@ -600,7 +669,8 @@ impl TextEditor {
                         if last.bold == st.bold
                             && last.italic == st.italic
                             && last.underline == st.underline
-                            && last.highlight == st.highlight =>
+                            && last.highlight == st.highlight
+                            && last.color == st.color =>
                     {
                         last.text.push(ch)
                     }
@@ -610,6 +680,7 @@ impl TextEditor {
                         italic: st.italic,
                         underline: st.underline,
                         highlight: st.highlight,
+                        color: st.color,
                     }),
                 }
                 it.forward_char();
@@ -633,7 +704,6 @@ impl TextEditor {
         }
     }
 
-    /// Replace (or remove, for Body) a line's marker.
     fn set_line_kind(&self, line: i32, kind: ParaKind) {
         self.internal.set(true);
         if let Some((_, mend)) = self.line_marker(line) {
@@ -651,7 +721,7 @@ impl TextEditor {
 
     /// Renumber numbered runs and refresh the hanging-indent tag.
     fn retag_lists(&self) {
-        self.internal.set(true);
+        let was = self.internal.replace(true);
         let mut n = 0u32;
         for line in 0..self.buffer.line_count() {
             match self.line_marker(line) {
@@ -679,7 +749,7 @@ impl TextEditor {
                 }
             }
         }
-        self.internal.set(false);
+        self.internal.set(was);
     }
 
     fn cursor_line(&self) -> i32 {
@@ -696,8 +766,8 @@ impl TextEditor {
         }
     }
 
-    /// Toolbar list buttons: apply `kind` to the selected lines, or remove it
-    /// when every selected line already has it.
+    /// Apply a list kind to the selected lines, or remove it when every
+    /// selected line already has it.
     pub fn toggle_list(&self, kind: ListKind) {
         let (a, b) = self.selected_lines();
         let target = match kind {
@@ -773,28 +843,34 @@ impl TextEditor {
 
     // -- geometry / styling --
 
-    /// Update the editor CSS for the current zoom and colors.
-    pub fn restyle(&self, font_px: f64, color: &gdk::RGBA, accent: &gdk::RGBA) {
+    /// Match the canvas metrics at the current zoom: font size, line pitch
+    /// (`cell_px`) with baselines on the rule lines, default text color.
+    pub fn restyle(&self, font_px: f64, cell_px: f64, natural_px: f64, color: &gdk::RGBA, accent: &gdk::RGBA) {
         let c = |v: f32| (v * 255.0).round() as u8;
         let fg = format!("#{:02x}{:02x}{:02x}", c(color.red()), c(color.green()), c(color.blue()));
         let ac = format!("rgba({},{},{},0.30)", c(accent.red()), c(accent.green()), c(accent.blue()));
-        let border = format!("rgba({},{},{},0.55)", c(accent.red()), c(accent.green()), c(accent.blue()));
+        let border = format!("rgba({},{},{},0.45)", c(accent.red()), c(accent.green()), c(accent.blue()));
         self.css.load_from_string(&format!(
-            "textview.oma-text-editor, textview.oma-text-editor text {{ background: transparent; color: {fg}; caret-color: {fg}; font-size: {font_px:.2}px; }}
-             textview.oma-text-editor {{ outline: 1px dashed {border}; outline-offset: 2px; }}
-             textview.oma-text-editor text selection {{ background-color: {ac}; color: {fg}; }}"
+            "textview.oma-text-editor, textview.oma-text-editor text {{ background: transparent; color: {fg}; caret-color: {fg}; font-size: {font_px:.2}px; padding: 0; }}
+             textview.oma-text-editor {{ outline: 1px dashed {border}; outline-offset: 3px; }}
+             textview.oma-text-editor text selection {{ background-color: {ac}; }}"
         ));
+        // Each visual line gets the leftover cell space ABOVE it, so the
+        // baseline lands where the canvas puts it (cell bottom - descent).
+        let extra = (cell_px - natural_px).max(0.0).round() as i32;
+        self.view.set_pixels_above_lines(extra);
+        self.view.set_pixels_inside_wrap(extra);
+        self.view.set_pixels_below_lines(0);
         let indent = (font_px * LIST_INDENT_EM) as i32;
         self.list.set_left_margin(indent);
         self.list.set_indent(-indent);
-        self.view.set_pixels_below_lines((font_px * PARA_GAP_EM) as i32);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omascratch_core::{SemanticColor, TextId};
+    use omascratch_core::{Rgba, TextId};
 
     fn tb(paras: Vec<Paragraph>) -> TextBox {
         TextBox {
@@ -814,15 +890,30 @@ mod tests {
     }
 
     #[test]
-    fn editor_round_trips_styles_and_lists() {
+    fn cell_height_snaps_to_rule_multiples() {
+        assert_eq!(cell_height(32.0, 18.0), 32.0);
+        assert_eq!(cell_height(32.0, 30.0), 64.0, "big text takes two rule rows");
+        assert_eq!(cell_height(24.0, 18.0), 24.0);
+    }
+
+    #[test]
+    fn editor_round_trips_styles_colors_and_lists() {
         gtk::test_synced(|| {
             if gtk::init().is_err() {
                 eprintln!("no display; skipping");
                 return;
             }
             let ed = TextEditor::new();
+            let red = SemanticColor::Fixed(Rgba { r: 0.9, g: 0.3, b: 0.35, a: 1.0 });
             let original = tb(vec![
-                Paragraph { kind: ParaKind::Body, spans: vec![span("Plain ", false, false), span("bold", true, false)] },
+                Paragraph {
+                    kind: ParaKind::Body,
+                    spans: vec![
+                        span("Plain ", false, false),
+                        span("bold", true, false),
+                        Span { text: " red".into(), color: Some(red), ..Default::default() },
+                    ],
+                },
                 Paragraph { kind: ParaKind::Number, spans: vec![span("one", false, false)] },
                 Paragraph { kind: ParaKind::Number, spans: vec![span("two", false, true)] },
                 Paragraph { kind: ParaKind::Check { checked: true }, spans: vec![span("done", false, false)] },
@@ -830,7 +921,6 @@ mod tests {
             ]);
             ed.load(&original);
             assert_eq!(ed.to_paras(), original.paras, "load -> to_paras is lossless");
-            // Numbered markers are renumbered literally in the buffer.
             let (s, e) = ed.buffer.bounds();
             let text = ed.buffer.text(&s, &e, true).to_string();
             assert!(text.contains("1. one") && text.contains("2. two"), "{text}");
@@ -845,12 +935,10 @@ mod tests {
             }
             let ed = TextEditor::new();
             ed.load(&tb(vec![Paragraph { kind: ParaKind::Body, spans: vec![span("first", false, false)] }]));
-            // Cursor at end of line 0, make it a numbered list.
             let end = ed.buffer.end_iter();
             ed.buffer.place_cursor(&end);
             ed.toggle_list(ListKind::Number);
             assert_eq!(ed.to_paras()[0].kind, ParaKind::Number);
-            // Return continues the list…
             let end = ed.buffer.end_iter();
             ed.buffer.place_cursor(&end);
             assert!(ed.list_return());
@@ -860,16 +948,13 @@ mod tests {
             assert_eq!(paras.len(), 2);
             assert_eq!(paras[1].kind, ParaKind::Number);
             assert_eq!(paras[1].plain_text(), "second");
-            // …and Return on an empty item ends it.
             let end = ed.buffer.end_iter();
             ed.buffer.place_cursor(&end);
             assert!(ed.list_return());
             let end = ed.buffer.end_iter();
             ed.buffer.place_cursor(&end);
             assert!(ed.list_return(), "empty list item: return converts it to body");
-            let paras = ed.to_paras();
-            assert_eq!(paras.last().unwrap().kind, ParaKind::Body);
-            // Toggling the same list kind again removes it.
+            assert_eq!(ed.to_paras().last().unwrap().kind, ParaKind::Body);
             let s = ed.buffer.start_iter();
             ed.buffer.place_cursor(&s);
             ed.toggle_list(ListKind::Number);
@@ -878,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_text_inherits_or_takes_pending_style() {
+    fn typed_text_inherits_or_takes_pending_style_and_color() {
         gtk::test_synced(|| {
             if gtk::init().is_err() {
                 return;
@@ -887,18 +972,19 @@ mod tests {
             ed.load(&tb(vec![Paragraph { kind: ParaKind::Body, spans: vec![span("B", true, false)] }]));
             let end = ed.buffer.end_iter();
             ed.buffer.place_cursor(&end);
-            // Typing after bold text continues bold.
             let mut it = ed.buffer.end_iter();
             ed.buffer.insert(&mut it, "old");
             assert_eq!(ed.to_paras()[0].spans, vec![span("Bold", true, false)]);
-            // Toggle bold off with no selection: next text is plain.
             ed.toggle(Fmt::Bold);
             let mut it = ed.buffer.end_iter();
             ed.buffer.insert(&mut it, " plain");
-            assert_eq!(
-                ed.to_paras()[0].spans,
-                vec![span("Bold", true, false), span(" plain", false, false)]
-            );
+            assert_eq!(ed.to_paras()[0].spans, vec![span("Bold", true, false), span(" plain", false, false)]);
+            // Pending color applies to the next typed text.
+            ed.set_color(Some(SemanticColor::Accent));
+            let mut it = ed.buffer.end_iter();
+            ed.buffer.insert(&mut it, "!");
+            let last = ed.to_paras()[0].spans.last().unwrap().clone();
+            assert_eq!((last.text.as_str(), last.color), ("!", Some(SemanticColor::Accent)));
         });
     }
 }

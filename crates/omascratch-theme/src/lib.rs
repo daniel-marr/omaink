@@ -278,9 +278,13 @@ window {{
     min-width: 0;
     padding: 2px;
 }}
-/* The chosen option in a flyout (color, list type, style). */
-.option-selected {{
+/* The chosen option in a flyout (color, list type, style). Specific
+   enough to beat Adwaita's `button.flat` reset. */
+popover button.option-selected,
+popover button.flat.option-selected,
+popover button.flat.option-selected:hover {{
     box-shadow: inset 0 0 0 2px {accent};
+    background-color: alpha({accent}, 0.15);
     border-radius: 5px;
 }}
 

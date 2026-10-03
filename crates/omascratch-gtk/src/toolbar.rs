@@ -894,9 +894,9 @@ impl Toolbar {
             })
         };
         for (label, tip, k) in [
-            ("•  ⋯", "Bulleted list", ListKind::Bullet),
-            ("1. ⋯", "Numbered list", ListKind::Number),
-            ("☐  ⋯", "Checklist (Ctrl+1)", ListKind::Check),
+            ("•  List", "Bulleted list", ListKind::Bullet),
+            ("1. List", "Numbered list", ListKind::Number),
+            ("☐  List", "Checklist (Ctrl+1)", ListKind::Check),
         ] {
             let b = fmt_button(label, tip);
             b.set_sensitive(editing);

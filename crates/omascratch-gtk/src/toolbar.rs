@@ -148,27 +148,39 @@ fn pen_glyph(cfg: PenCfg, rgba: gdk::RGBA) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_width(26);
     area.set_content_height(44);
-    area.set_draw_func(move |_, cr, w, h| {
-        let w = w as f64;
-        let h = h as f64;
+    area.set_draw_func(move |_, cr, w, h| draw_pen(cr, cfg.tool, rgba, w as f64, h as f64));
+    area
+}
+
+fn draw_pen(cr: &gtk::cairo::Context, tool: Tool, rgba: gdk::RGBA, w: f64, h: f64) {
         let cx = w / 2.0;
         let set = |cr: &gtk::cairo::Context| {
             cr.set_source_rgba(rgba.red() as f64, rgba.green() as f64, rgba.blue() as f64, 1.0)
         };
-        match cfg.tool {
+        match tool {
             Tool::Highlighter => {
-                let bw = w * 0.62;
+                // Same height as the pencil: barrel from 6% down to a
+                // tapered collar and an angled chisel tip at 96%.
+                let bw = w * 0.56;
                 cr.set_source_rgb(0.18, 0.19, 0.25);
-                rounded_rect(cr, cx - bw / 2.0, h * 0.18, bw, h * 0.52, 2.5);
+                rounded_rect(cr, cx - bw / 2.0, h * 0.06, bw, h * 0.56, 2.5);
                 let _ = cr.fill();
                 set(cr);
-                cr.rectangle(cx - bw / 2.0 + 2.0, h * 0.30, bw - 4.0, h * 0.16);
+                cr.rectangle(cx - bw / 2.0 + 2.0, h * 0.16, bw - 4.0, h * 0.16);
+                let _ = cr.fill();
+                let tw = bw * 0.62;
+                cr.set_source_rgb(0.30, 0.31, 0.38);
+                cr.move_to(cx - bw / 2.0, h * 0.62);
+                cr.line_to(cx + bw / 2.0, h * 0.62);
+                cr.line_to(cx + tw / 2.0, h * 0.78);
+                cr.line_to(cx - tw / 2.0, h * 0.78);
+                cr.close_path();
                 let _ = cr.fill();
                 set(cr);
-                cr.move_to(cx - bw / 2.0, h * 0.70);
-                cr.line_to(cx + bw / 2.0, h * 0.70);
-                cr.line_to(cx + bw * 0.28, h * 0.94);
-                cr.line_to(cx - bw * 0.28, h * 0.94);
+                cr.move_to(cx - tw / 2.0, h * 0.78);
+                cr.line_to(cx + tw / 2.0, h * 0.78);
+                cr.line_to(cx + tw / 2.0, h * 0.86);
+                cr.line_to(cx - tw / 2.0, h * 0.96);
                 cr.close_path();
                 let _ = cr.fill();
             }
@@ -212,8 +224,6 @@ fn pen_glyph(cfg: PenCfg, rgba: gdk::RGBA) -> gtk::DrawingArea {
                 let _ = cr.fill();
             }
         }
-    });
-    area
 }
 
 /// Eraser: a bold angled rubber with a pink working band and two motion
@@ -1950,4 +1960,46 @@ fn vsep() -> gtk::Separator {
     s.set_margin_top(8);
     s.set_margin_bottom(8);
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Renders pencil + highlighter + pen chips (PPM) to $OMASCRATCH_GLYPH_PPM for review.
+    #[test]
+    fn render_pen_glyphs() {
+        let Some(out) = std::env::var_os("OMASCRATCH_GLYPH_PPM") else { return };
+        let surf = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 26 * 3 * 4, 44 * 4).unwrap();
+        let cr = gtk::cairo::Context::new(&surf).unwrap();
+        cr.scale(4.0, 4.0);
+        cr.set_source_rgb(0.1, 0.1, 0.14);
+        let _ = cr.paint();
+        for (i, (tool, c)) in [
+            (Tool::Pencil, gdk::RGBA::new(0.4, 0.7, 0.5, 1.0)),
+            (Tool::Highlighter, gdk::RGBA::new(0.98, 0.84, 0.25, 1.0)),
+            (Tool::Pen, gdk::RGBA::new(0.6, 0.5, 0.9, 1.0)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let _ = cr.save();
+            cr.translate(26.0 * i as f64, 0.0);
+            draw_pen(&cr, tool, c, 26.0, 44.0);
+            let _ = cr.restore();
+        }
+        drop(cr);
+        // Raw BGRA -> binary PPM (no PNG support in this cairo build).
+        let (w, h, stride) = (surf.width() as usize, surf.height() as usize, surf.stride() as usize);
+        let mut surf = surf;
+        let data = surf.data().unwrap();
+        let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * stride + x * 4;
+                ppm.extend_from_slice(&[data[i + 2], data[i + 1], data[i]]);
+            }
+        }
+        std::fs::write(out, ppm).unwrap();
+    }
 }

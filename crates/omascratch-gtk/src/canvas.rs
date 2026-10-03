@@ -3135,14 +3135,13 @@ impl CanvasView {
 
         // Live stroke: recomputed each frame.
         if let Some(live) = st.live.as_ref() {
-            let outline = omascratch_ink::outline_points(
+            let path = omascratch_ink::stroke_path(
                 &live.points,
                 live.tool,
                 live.width,
                 live_simulate.unwrap_or(false),
                 false,
             );
-            let path = omascratch_ink::outline_to_bezpath(&outline);
             if !path.is_empty() {
                 let color = resolve_color_inv(live.color, live.tool, st.inverted, &st.palette);
                 snapshot.append_fill(&bezpath_to_gsk(&path), gsk::FillRule::Winding, &color);

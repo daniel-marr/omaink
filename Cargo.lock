@@ -653,6 +653,7 @@ dependencies = [
 name = "omascratch-store"
 version = "0.1.0"
 dependencies = [
+ "kurbo",
  "omascratch-core",
  "omascratch-ink",
  "serde",

@@ -76,6 +76,19 @@ Harness: `crates/omascratch-store/examples/gen_stress.rs` builds an isolated pro
 
 Correctness parity in the same runs: eraser sweep hits (10) and lasso selection (114) identical before/after. Also fixed: sync conflict copies were never listed in the sidebar (filenames don't parse as ids); rows are now keyed by path and conflict copies show with a "(sync conflict)" suffix.
 
+### Stamped pen/pencil renderer — cost check (2026-10-03, release build, this machine)
+
+Pen and pencil strokes switched from the perfect-freehand outline to a union of pressure-sized round segments (fixes notches, pinched starts and missed landing curls on wide strokes). Same harness as above, plus `examples/ink_bench.rs` (path construction only):
+
+| Measure | Freehand outline | Stamped |
+|---|---|---|
+| Path build, user's real note (183 strokes) | 0.003 ms/stroke, 47 path elements/stroke | 0.009 ms/stroke, 132 elements/stroke |
+| Path build, 5,000 synthetic zig-zag strokes (worst case: nothing to simplify) | 0.007 ms/stroke, 176 elements/stroke | 0.039 ms/stroke, 737 elements/stroke |
+| Pan frame snapshot (stress note) | 0.38 ms avg, 0.95 max | 0.99 ms avg, 2.01 max |
+| First frames incl. node cache build (stress note) | 1.85 ms avg, 3.47 max | 9.67 ms avg, 19.14 max |
+
+GPU fill time is not measured by the harness. Highlighters still use the freehand outline.
+
 ### Image file drag-and-drop — investigated and removed (2026-10-03)
 
 - Diagnostic window-level drop logging showed the user's file manager (Strata, native GTK4) reaches the window with formats `GdkFileList … text/uri-list … application/vnd.portal.filetransfer` but offers **only the MOVE action**. The canvas target deliberately refused MOVE (a completed move lets the source delete the original file), so drops were rejected.

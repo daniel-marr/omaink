@@ -28,6 +28,13 @@ fn main() {
             y1 = y1.max(p.y);
         }
     }
+    if std::env::var_os("LIST").is_some() {
+        eprintln!("origin {} {}", x0, y0);
+        for (i, s) in doc.content.strokes.iter().filter(|s| s.width >= min_w).enumerate() {
+            let p = s.points[0];
+            eprintln!("#{i} start ({:.0},{:.0}) n={} w={:.1}", p.x, p.y, s.points.len(), s.width);
+        }
+    }
     let pad = if only.is_some() { 12.0 } else { 40.0 };
     let mut svg = format!(
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='{} {} {} {}' width='{}' height='{}'><rect x='{}' y='{}' width='100%' height='100%' fill='white'/>",
@@ -36,7 +43,7 @@ fn main() {
     );
     for s in &strokes {
         let path = omascratch_ink::stroke_bezpath(&s.points, s.tool, s.width, false);
-        svg.push_str(&format!("<path d='{}' fill='black' fill-opacity='1' fill-rule='nonzero'/>", path.to_svg()));
+        svg.push_str(&format!("<path d='{}' fill='black' fill-rule='nonzero'/>", path.to_svg()));
         if only.is_some() {
             // Debug view: raw samples (red) and outline vertices (blue).
             for p in &s.points {

@@ -18,4 +18,5 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+kurbo.workspace = true
 tempfile.workspace = true

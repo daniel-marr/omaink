@@ -1,6 +1,13 @@
-//! Raw samples → render-ready outline, via the perfect-freehand algorithm
-//! (`freedraw`). The outline polygon is smoothed into a closed quadratic
-//! Bézier path (midpoint smoothing, as upstream perfect-freehand renders it).
+//! Raw samples → render-ready path.
+//!
+//! Pen and pencil strokes are the union of tapered round segments ("stamped"
+//! capsules) along the lightly smoothed samples, sized by pressure. Every
+//! piece is convex and wound the same way, so a nonzero fill is an exact
+//! union: no notches, pinches or detached caps however wide the pen is or
+//! however sharply it turns.
+//!
+//! Highlighters keep the perfect-freehand outline (`freedraw`) for their
+//! flat chisel ends; at constant width it has none of those problems.
 
 use freedraw::{get_stroke, InputPoint, StrokeOptions, TaperOptions};
 use kurbo::BezPath;
@@ -15,9 +22,6 @@ fn options_for(tool: Tool, width: f64, simulate_pressure: bool, last: bool) -> S
         simulate_pressure: Some(simulate_pressure),
         ..Default::default()
     };
-    // freedraw's start cap sweeps the wrong way (it bites into wide
-    // strokes); we add our own round start cap in `outline_points`.
-    o.start = Some(TaperOptions { cap: Some(false), ..Default::default() });
     match tool {
         Tool::Pen => {
             o.thinning = Some(0.55);
@@ -103,86 +107,133 @@ pub fn outline_points(
     last: bool,
 ) -> Vec<[f64; 2]> {
     let cleaned = clean_samples(points, width);
-    // Taps and tiny dashes (an i's dot): too few samples for a freehand
-    // outline, which degenerates into a sliver. Draw a round dot/capsule.
-    if round_start(tool) && !cleaned.is_empty() {
-        let len: f64 = cleaned.windows(2).map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y)).sum();
-        if cleaned.len() < 3 || len < width * 0.5 {
-            let p = cleaned.iter().map(|p| p.pressure).fold(0.0f32, f32::max) as f64;
-            let p = if simulate_pressure { 0.5 } else { p };
-            let thinning = if tool == Tool::Pen { 0.55 } else { 0.35 };
-            let r = (width * (0.5 - thinning * (0.5 - p))).max(width * 0.15);
-            let (a, b) = (cleaned[0], cleaned[cleaned.len() - 1]);
-            return capsule([a.x, a.y], [b.x, b.y], r);
-        }
-    }
     let input: Vec<InputPoint> = cleaned
         .iter()
         .map(|p| InputPoint::Array([p.x, p.y], Some(p.pressure as f64)))
         .collect();
-    let mut outline = get_stroke(&input, &options_for(tool, width, simulate_pressure, last));
-    if round_start(tool) {
-        add_round_start_cap(&mut outline);
-    }
-    outline
+    get_stroke(&input, &options_for(tool, width, simulate_pressure, last))
 }
 
-/// Closed outline of a capsule (a dot when `a == b`) of radius `r`.
-fn capsule(a: [f64; 2], b: [f64; 2], r: f64) -> Vec<[f64; 2]> {
-    let ang = (b[1] - a[1]).atan2(b[0] - a[0]);
-    const STEPS: usize = 12;
-    let mut out = Vec::with_capacity(2 * STEPS + 3);
-    // Half circle around b (right of travel → left), then around a.
-    for i in 0..=STEPS {
-        let t = ang - std::f64::consts::FRAC_PI_2 + std::f64::consts::PI * i as f64 / STEPS as f64;
-        out.push([b[0] + r * t.cos(), b[1] + r * t.sin()]);
+/// Pressure → radius, perfect-freehand style: `thinning` is how much
+/// pressure changes the width (0 = constant).
+fn radius_for(width: f64, thinning: f64, pressure: f64) -> f64 {
+    (width * (0.5 - thinning * (0.5 - pressure))).max(width * 0.08)
+}
+
+/// 3-tap moving average over positions and pressure, ends pinned: removes
+/// sensor jitter without shortening the stroke or lagging behind the pen.
+fn smooth(points: &[InkPoint]) -> Vec<InkPoint> {
+    let n = points.len();
+    if n < 3 {
+        return points.to_vec();
     }
-    for i in 0..=STEPS {
-        let t = ang + std::f64::consts::FRAC_PI_2 + std::f64::consts::PI * i as f64 / STEPS as f64;
-        out.push([a[0] + r * t.cos(), a[1] + r * t.sin()]);
+    let mut out = points.to_vec();
+    for i in 1..n - 1 {
+        let (a, b, c) = (points[i - 1], points[i], points[i + 1]);
+        out[i].x = (a.x + 2.0 * b.x + c.x) / 4.0;
+        out[i].y = (a.y + 2.0 * b.y + c.y) / 4.0;
+        out[i].pressure = (a.pressure + 2.0 * b.pressure + c.pressure) / 4.0;
     }
-    out.push(out[0]);
     out
 }
 
-fn round_start(tool: Tool) -> bool {
-    matches!(tool, Tool::Pen | Tool::Pencil)
+/// Douglas–Peucker over (x, y, radius): drop samples the stamped outline
+/// would not visibly change (deviation under `eps` in position, or in
+/// radius). Keeps segment counts low on smooth runs.
+fn simplify(pts: &[(kurbo::Point, f64)], eps: f64) -> Vec<(kurbo::Point, f64)> {
+    if pts.len() < 3 {
+        return pts.to_vec();
+    }
+    let mut keep = vec![false; pts.len()];
+    keep[0] = true;
+    keep[pts.len() - 1] = true;
+    let mut stack = vec![(0usize, pts.len() - 1)];
+    while let Some((i, j)) = stack.pop() {
+        if j <= i + 1 {
+            continue;
+        }
+        let (a, ra) = pts[i];
+        let (b, rb) = pts[j];
+        let ab = b - a;
+        let len2 = ab.hypot2();
+        let mut worst = (0.0, 0usize);
+        for (k, &(p, r)) in pts.iter().enumerate().take(j).skip(i + 1) {
+            let t = if len2 > 0.0 { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let on = a + ab * t;
+            let dev = p.distance(on).max((r - (ra + (rb - ra) * t)).abs());
+            if dev > worst.0 {
+                worst = (dev, k);
+            }
+        }
+        if worst.0 > eps {
+            keep[worst.1] = true;
+            stack.push((i, worst.1));
+            stack.push((worst.1, j));
+        }
+    }
+    pts.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
 }
 
-/// Close the flat start edge (last outline vertex → first) with an outward
-/// semicircle. The outline (start cap off) is: right side from the start,
-/// end cap, left side back to the start, then a closing duplicate.
-fn add_round_start_cap(outline: &mut Vec<[f64; 2]>) {
-    if outline.len() >= 2 && outline.first() == outline.last() {
-        outline.pop();
-    }
-    let n = outline.len();
-    if n < 4 {
-        return;
-    }
-    let r_pt = outline[0];
-    let l_pt = outline[n - 1];
-    let mid = [(r_pt[0] + l_pt[0]) / 2.0, (r_pt[1] + l_pt[1]) / 2.0];
-    let radius = (r_pt[0] - l_pt[0]).hypot(r_pt[1] - l_pt[1]) / 2.0;
-    if radius < 1e-6 {
-        return;
-    }
-    // Into the stroke: toward the next pair of side points.
-    let inner = [(outline[1][0] + outline[n - 2][0]) / 2.0 - mid[0], (outline[1][1] + outline[n - 2][1]) / 2.0 - mid[1]];
-    let a0 = (l_pt[1] - mid[1]).atan2(l_pt[0] - mid[0]);
-    // Sweep from the left point to the right point through the side facing
-    // away from the stroke.
-    let probe = |sign: f64| {
-        let a = a0 + sign * std::f64::consts::FRAC_PI_2;
-        (a.cos() * inner[0] + a.sin() * inner[1]) < 0.0
+/// Append the convex hull of circles (a, ra) and (b, rb) as one closed
+/// subpath, always wound in the same (increasing-angle) direction.
+fn push_capsule(path: &mut BezPath, a: kurbo::Point, ra: f64, b: kurbo::Point, rb: f64, tol: f64) {
+    use std::f64::consts::TAU;
+    let circle = |path: &mut BezPath, c: kurbo::Point, r: f64| {
+        path.move_to((c.x + r, c.y));
+        let arc = kurbo::Arc::new(c, (r, r), 0.0, TAU, 0.0);
+        arc.append_iter(tol).for_each(|el| path.push(el));
+        path.close_path();
     };
-    let sign = if probe(1.0) { 1.0 } else { -1.0 };
-    const STEPS: usize = 8;
-    for i in 1..STEPS {
-        let a = a0 + sign * std::f64::consts::PI * i as f64 / STEPS as f64;
-        outline.push([mid[0] + radius * a.cos(), mid[1] + radius * a.sin()]);
+    let d = a.distance(b);
+    if d + ra.min(rb) <= ra.max(rb) {
+        // One circle contains the other.
+        if ra >= rb { circle(path, a, ra) } else { circle(path, b, rb) }
+        return;
     }
-    outline.push(outline[0]);
+    let theta = (b.y - a.y).atan2(b.x - a.x);
+    let phi = ((ra - rb) / d).clamp(-1.0, 1.0).acos();
+    let at = |c: kurbo::Point, r: f64, ang: f64| kurbo::Point::new(c.x + r * ang.cos(), c.y + r * ang.sin());
+    // Front arc around b, tangent line, back arc around a, tangent line.
+    path.move_to(at(b, rb, theta - phi));
+    kurbo::Arc::new(b, (rb, rb), theta - phi, 2.0 * phi, 0.0).append_iter(tol).for_each(|el| path.push(el));
+    path.line_to(at(a, ra, theta + phi));
+    kurbo::Arc::new(a, (ra, ra), theta + phi, TAU - 2.0 * phi, 0.0).append_iter(tol).for_each(|el| path.push(el));
+    path.close_path();
+}
+
+/// Pen/pencil: union of pressure-sized round segments along the samples.
+fn stamped_path(points: &[InkPoint], tool: Tool, width: f64, simulate_pressure: bool) -> BezPath {
+    let mut path = BezPath::new();
+    let pts = smooth(&clean_samples(points, width));
+    if pts.is_empty() {
+        return path;
+    }
+    let thinning = match tool {
+        Tool::Pen => 0.55,
+        Tool::Pencil => 0.35,
+        _ => 0.0,
+    };
+    let r = |p: &InkPoint| radius_for(width, thinning, if simulate_pressure { 0.5 } else { p.pressure as f64 });
+    let tol = (width * 0.01).clamp(0.01, 0.1);
+    let stamps: Vec<(kurbo::Point, f64)> = pts.iter().map(|p| (kurbo::Point::new(p.x, p.y), r(p))).collect();
+    let stamps = simplify(&stamps, (width * 0.02).clamp(0.04, 0.25));
+    if stamps.len() == 1 {
+        push_capsule(&mut path, stamps[0].0, stamps[0].1, stamps[0].0, stamps[0].1, tol);
+        return path;
+    }
+    for w in stamps.windows(2) {
+        push_capsule(&mut path, w[0].0, w[0].1, w[1].0, w[1].1, tol);
+    }
+    path
+}
+
+/// Render-ready path for a stroke, or a live prefix of one (`last` false).
+/// Fill with the nonzero rule.
+pub fn stroke_path(points: &[InkPoint], tool: Tool, width: f64, simulate_pressure: bool, last: bool) -> BezPath {
+    match tool {
+        Tool::Pen | Tool::Pencil => stamped_path(points, tool, width, simulate_pressure),
+        _ => outline_to_bezpath(&outline_points(points, tool, width, simulate_pressure, last)),
+    }
 }
 
 /// Midpoint-smooth a closed outline polygon into a quadratic Bézier path.
@@ -209,7 +260,7 @@ pub fn outline_to_bezpath(outline: &[[f64; 2]]) -> BezPath {
 
 /// Convenience: full pipeline for a committed stroke.
 pub fn stroke_bezpath(points: &[InkPoint], tool: Tool, width: f64, simulate_pressure: bool) -> BezPath {
-    outline_to_bezpath(&outline_points(points, tool, width, simulate_pressure, true))
+    stroke_path(points, tool, width, simulate_pressure, true)
 }
 
 #[cfg(test)]
@@ -340,8 +391,9 @@ mod tests {
         // thinning * (0.5 - pressure)), pen thinning 0.55).
         let max_p = drawn.iter().map(|p| p.pressure as f64).fold(0.0, f64::max);
         let r_max = 13.8 * (0.5 - 0.55 * (0.5 - max_p));
-        for v in outline_points(&pts, Tool::Pen, 13.8, false, true) {
-            let d = reach(kurbo::Point::new(v[0], v[1]));
+        for el in path.elements() {
+            let Some(v) = el.end_point() else { continue };
+            let d = reach(v);
             assert!(d <= r_max + 0.75, "outline vertex {v:?} is {d:.2} from the stroke (hook; max radius {r_max:.2})");
         }
     }
@@ -354,5 +406,89 @@ mod tests {
         assert!(b.width() > 6.0 && b.height() > 6.0, "dot, not a sliver: {b:?}");
         assert!((b.width() - b.height()).abs() < 2.0, "roughly round: {b:?}");
         assert_ne!(path.winding(kurbo::Point::new(50.2, 50.0)), 0, "dot is filled");
+    }
+
+    /// A real 10-wide "s" that starts with a landing curl (the old outline
+    /// skipped the curl and folded back on itself, notching the fill).
+    fn curl_stroke() -> Vec<InkPoint> {
+        [
+            (285.96, 844.99, 0.047),
+            (285.84, 844.93, 0.083),
+            (285.62, 844.88, 0.119),
+            (285.34, 844.77, 0.155),
+            (284.95, 844.71, 0.190),
+            (284.62, 844.60, 0.222),
+            (284.29, 844.60, 0.253),
+            (283.95, 844.55, 0.281),
+            (283.67, 844.60, 0.308),
+            (283.34, 844.71, 0.333),
+            (283.00, 844.82, 0.357),
+            (282.66, 845.05, 0.379),
+            (282.33, 845.32, 0.399),
+            (281.94, 845.66, 0.417),
+            (281.55, 846.04, 0.435),
+            (281.16, 846.49, 0.452),
+            (280.71, 846.99, 0.469),
+            (280.32, 847.54, 0.484),
+            (279.99, 848.04, 0.498),
+            (279.71, 848.60, 0.512),
+            (279.54, 849.10, 0.524),
+            (279.37, 849.54, 0.535),
+            (279.32, 850.04, 0.546),
+            (279.37, 850.54, 0.556),
+            (279.60, 851.09, 0.566),
+            (279.93, 851.82, 0.575),
+            (280.60, 852.54, 0.583),
+            (281.50, 853.37, 0.591),
+            (282.95, 854.42, 0.598),
+            (284.79, 855.48, 0.604),
+            (287.02, 856.70, 0.610),
+            (289.41, 858.03, 0.615),
+            (291.54, 859.20, 0.620),
+            (293.43, 860.30, 0.625),
+            (294.99, 861.30, 0.629),
+            (296.28, 862.19, 0.633),
+            (297.39, 863.14, 0.636),
+            (298.34, 864.13, 0.639),
+            (299.07, 865.13, 0.642),
+            (299.57, 866.08, 0.645),
+            (299.85, 866.96, 0.647),
+            (299.96, 867.80, 0.649),
+            (299.85, 868.68, 0.651),
+            (299.46, 869.68, 0.653),
+            (298.79, 870.79, 0.654),
+            (297.89, 871.96, 0.655),
+            (296.39, 873.23, 0.656),
+            (294.55, 874.51, 0.657),
+            (292.59, 875.62, 0.657),
+            (290.53, 876.68, 0.655),
+            (288.75, 877.34, 0.650),
+            (287.02, 877.84, 0.643),
+            (285.34, 878.12, 0.633),
+            (283.78, 878.29, 0.621),
+            (282.16, 878.34, 0.607),
+            (280.71, 878.29, 0.588),
+            (279.37, 878.12, 0.563),
+            (278.20, 877.90, 0.546),
+            (277.25, 877.56, 0.454),
+            (276.59, 877.18, 0.376),
+            (276.08, 876.73, 0.312),
+            (275.53, 875.40, 0.050),
+            (275.53, 875.40, 0.050),
+            (275.53, 875.40, 0.050),
+        ]
+        .iter()
+        .map(|&(x, y, p)| sample(x, y, p))
+        .collect()
+    }
+
+    #[test]
+    fn every_drawn_sample_is_inside_the_stroke() {
+        for (name, pts, width) in [("t", real_stroke(), 13.8), ("s curl", curl_stroke(), 10.0)] {
+            let path = stroke_bezpath(&pts, Tool::Pen, width, false);
+            for p in pts.iter().filter(|p| p.pressure > LIFT_PRESSURE) {
+                assert_ne!(path.winding(kurbo::Point::new(p.x, p.y)), 0, "{name}: sample ({}, {}) outside the fill", p.x, p.y);
+            }
+        }
     }
 }

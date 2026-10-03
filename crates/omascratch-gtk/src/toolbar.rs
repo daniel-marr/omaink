@@ -87,45 +87,57 @@ fn default_pens() -> Vec<PenCfg> {
 fn color_rows() -> Vec<Vec<(&'static str, SemanticColor)>> {
     vec![
         vec![
+            ("Lemon", fixed(1.00, 0.92, 0.45)),
             ("Yellow", fixed(0.98, 0.84, 0.25)),
             ("Amber", fixed(0.96, 0.69, 0.22)),
             ("Orange", fixed(0.95, 0.56, 0.24)),
             ("Vermilion", fixed(0.93, 0.42, 0.26)),
             ("Red", fixed(0.90, 0.30, 0.35)),
+            ("Crimson", fixed(0.72, 0.15, 0.24)),
         ],
         vec![
+            ("Rose", fixed(0.94, 0.40, 0.52)),
             ("Magenta", fixed(0.87, 0.33, 0.62)),
             ("Pink", fixed(0.93, 0.47, 0.73)),
             ("Purple", fixed(0.73, 0.60, 0.97)),
             ("Violet", fixed(0.56, 0.44, 0.86)),
             ("Indigo", fixed(0.42, 0.38, 0.80)),
+            ("Deep purple", fixed(0.36, 0.22, 0.60)),
         ],
         vec![
+            ("Navy", fixed(0.15, 0.27, 0.60)),
             ("Blue", fixed(0.42, 0.62, 0.96)),
             ("Azure", fixed(0.30, 0.71, 0.92)),
             ("Cyan", fixed(0.31, 0.78, 0.84)),
             ("Teal", fixed(0.33, 0.78, 0.76)),
             ("Sea green", fixed(0.30, 0.74, 0.59)),
+            ("Emerald", fixed(0.16, 0.58, 0.40)),
         ],
         vec![
+            ("Forest", fixed(0.22, 0.48, 0.28)),
             ("Green", fixed(0.55, 0.78, 0.35)),
             ("Lime", fixed(0.71, 0.84, 0.33)),
             ("Olive", fixed(0.60, 0.62, 0.35)),
-            ("Brown", fixed(0.65, 0.48, 0.34)),
             ("Tan", fixed(0.78, 0.65, 0.50)),
+            ("Brown", fixed(0.65, 0.48, 0.34)),
+            ("Chocolate", fixed(0.42, 0.28, 0.19)),
         ],
         vec![
             ("Black", fixed(0.08, 0.08, 0.10)),
+            ("Charcoal", fixed(0.20, 0.21, 0.25)),
             ("Dark grey", fixed(0.32, 0.34, 0.40)),
             ("Grey", fixed(0.55, 0.57, 0.63)),
+            ("Light grey", fixed(0.78, 0.80, 0.84)),
             ("White", fixed(0.95, 0.96, 0.98)),
             ("Theme ink", SemanticColor::Foreground),
         ],
         vec![
             ("Pastel pink", fixed(0.96, 0.75, 0.79)),
+            ("Pastel peach", fixed(0.98, 0.82, 0.70)),
             ("Pastel yellow", fixed(0.97, 0.91, 0.69)),
-            ("Pastel blue", fixed(0.74, 0.84, 0.97)),
             ("Pastel green", fixed(0.78, 0.92, 0.78)),
+            ("Pastel blue", fixed(0.74, 0.84, 0.97)),
+            ("Pastel lavender", fixed(0.85, 0.80, 0.97)),
             ("Accent", SemanticColor::Accent),
         ],
     ]
@@ -1508,7 +1520,7 @@ impl Toolbar {
         if !recent.is_empty() {
             vbox.append(&section_label("Recent Colors"));
             let rrow = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            for color in recent.into_iter().take(6) {
+            for color in recent.into_iter().take(7) {
                 rrow.append(&self.color_button(color, idx, &cfg, &preview, &trow, &swatches));
             }
             vbox.append(&rrow);
@@ -1786,7 +1798,7 @@ impl Toolbar {
         let mut r = self.inner.recent.borrow_mut();
         r.retain(|c| *c != color);
         r.insert(0, color);
-        r.truncate(6);
+        r.truncate(7);
     }
 
     // -- eraser flyout --

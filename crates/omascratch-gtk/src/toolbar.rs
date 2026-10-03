@@ -509,23 +509,77 @@ fn lasso_glyph() -> gtk::DrawingArea {
         let w = w as f64;
         let h = h as f64;
         cr.set_source_rgb(0.78, 0.82, 0.96);
-        cr.set_line_width(1.5);
+        cr.set_line_width(1.8);
         // Closed dashed loop, centered.
-        cr.set_dash(&[2.6, 2.2], 0.0);
+        cr.set_dash(&[3.0, 2.4], 0.0);
         let _ = cr.save();
         cr.translate(w / 2.0, h / 2.0);
         cr.scale(1.0, 0.78);
-        cr.arc(0.0, 0.0, w * 0.36, 0.0, std::f64::consts::TAU);
+        cr.arc(0.0, 0.0, w * 0.43, 0.0, std::f64::consts::TAU);
         let _ = cr.stroke();
         let _ = cr.restore();
         // Solid knot sitting ON the loop (bottom-right) — no floating tail.
         cr.set_dash(&[], 0.0);
-        let kx = w / 2.0 + w * 0.36 * 0.707;
-        let ky = h / 2.0 + h * 0.78 * 0.36 * 0.707;
-        cr.arc(kx, ky, 2.2, 0.0, std::f64::consts::TAU);
+        let kx = w / 2.0 + w * 0.43 * 0.707;
+        let ky = h / 2.0 + h * 0.78 * 0.43 * 0.707;
+        cr.arc(kx, ky, 2.6, 0.0, std::f64::consts::TAU);
         let _ = cr.fill();
     });
     area
+}
+
+/// A 22px outline glyph drawn on Lucide's 24-unit grid (ISC), matching the
+/// hand icon's stroke.
+fn lucide_glyph(draw: impl Fn(&gtk::cairo::Context) + 'static) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(22);
+    area.set_content_height(22);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(move |_, cr, w, h| {
+        let k = (w.min(h) as f64) / 24.0;
+        cr.scale(k, k);
+        cr.set_source_rgb(0.78, 0.82, 0.96);
+        cr.set_line_width(1.8);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+        draw(cr);
+        let _ = cr.stroke();
+    });
+    area
+}
+
+/// Copy: two overlapping sheets (Lucide `copy`).
+fn copy_glyph() -> gtk::DrawingArea {
+    lucide_glyph(|cr| {
+        rounded_rect(cr, 8.0, 8.0, 14.0, 14.0, 2.0);
+        // Back sheet: only the parts not hidden by the front one.
+        cr.new_sub_path();
+        cr.move_to(4.0, 16.0);
+        cr.arc(4.0, 14.0, 2.0, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+        cr.line_to(2.0, 4.0);
+        cr.arc(4.0, 4.0, 2.0, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+        cr.line_to(14.0, 2.0);
+        cr.arc(14.0, 4.0, 2.0, 1.5 * std::f64::consts::PI, 0.0);
+    })
+}
+
+/// Paste: a clipboard (Lucide `clipboard`).
+fn paste_glyph() -> gtk::DrawingArea {
+    lucide_glyph(|cr| {
+        rounded_rect(cr, 8.0, 2.0, 8.0, 4.0, 1.0);
+        cr.new_sub_path();
+        cr.move_to(16.0, 4.0);
+        cr.line_to(18.0, 4.0);
+        cr.arc(18.0, 6.0, 2.0, 1.5 * std::f64::consts::PI, 0.0);
+        cr.line_to(20.0, 20.0);
+        cr.arc(18.0, 20.0, 2.0, 0.0, std::f64::consts::FRAC_PI_2);
+        cr.line_to(6.0, 22.0);
+        cr.arc(6.0, 20.0, 2.0, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+        cr.line_to(4.0, 6.0);
+        cr.arc(6.0, 6.0, 2.0, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+        cr.line_to(8.0, 4.0);
+    })
 }
 
 fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -685,14 +739,16 @@ impl Toolbar {
         tb.widget.append(&select_btn);
         tb.widget.append(&pan_btn);
         tb.widget.append(&lasso_btn);
-        let copy_btn = gtk::Button::from_icon_name("edit-copy-symbolic");
+        let copy_btn = gtk::Button::new();
+        copy_btn.set_child(Some(&copy_glyph()));
         copy_btn.add_css_class("flat");
         copy_btn.set_tooltip_text(Some("Copy selection (Ctrl+C)"));
         let c = canvas.clone();
         copy_btn.connect_clicked(move |_| {
             c.copy_selection();
         });
-        let paste_btn = gtk::Button::from_icon_name("edit-paste-symbolic");
+        let paste_btn = gtk::Button::new();
+        paste_btn.set_child(Some(&paste_glyph()));
         paste_btn.add_css_class("flat");
         paste_btn.set_tooltip_text(Some("Paste (Ctrl+V)"));
         let c = canvas.clone();

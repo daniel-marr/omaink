@@ -11,5 +11,6 @@ Third-party code and guidance:
 
 ## Lucide icons
 
-The pan (hand) toolbar glyph is traced from Lucide's `hand` icon
+The pan (hand), copy and paste toolbar glyphs are traced from Lucide's
+`hand`, `copy` and `clipboard` icons
 (https://lucide.dev), ISC License, Copyright (c) Lucide Contributors.

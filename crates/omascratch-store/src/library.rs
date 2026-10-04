@@ -182,6 +182,18 @@ fn sibling_note_keys(notebook_dir: &Path, folder: Option<FolderId>) -> Vec<Strin
     keys
 }
 
+/// Background for notes created from now on (the "New page defaults"
+/// setting). Process-wide; the app sets it at startup and on change.
+static NEW_NOTE_BACKGROUND: std::sync::Mutex<Option<omascratch_core::PageBackground>> = std::sync::Mutex::new(None);
+
+pub fn set_new_note_background(bg: omascratch_core::PageBackground) {
+    *NEW_NOTE_BACKGROUND.lock().unwrap() = Some(bg);
+}
+
+fn new_note_background() -> omascratch_core::PageBackground {
+    NEW_NOTE_BACKGROUND.lock().unwrap().unwrap_or_default()
+}
+
 pub fn create_note(
     notebook: &NotebookTree,
     title: &str,
@@ -197,7 +209,7 @@ pub fn create_note(
         order_key: key_after_last(&siblings),
         created_ms: now_ms(),
         modified_ms: now_ms(),
-        background: Default::default(),
+        background: new_note_background(),
         content: omascratch_core::NoteContent::default(),
         opaque_elements: vec![],
     };
@@ -221,7 +233,7 @@ pub fn create_note_with_key(
         order_key,
         created_ms: now_ms(),
         modified_ms: now_ms(),
-        background: Default::default(),
+        background: new_note_background(),
         content: omascratch_core::NoteContent::default(),
         opaque_elements: vec![],
     };

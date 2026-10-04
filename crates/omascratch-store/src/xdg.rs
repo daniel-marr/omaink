@@ -45,11 +45,87 @@ pub struct Settings {
     /// Pen & ink preferences (absent in older files → defaults).
     #[serde(default)]
     pub ink: InkSettings,
+    /// Defaults for newly created notes.
+    #[serde(default)]
+    pub page: PageDefaults,
+    #[serde(default)]
+    pub appearance: AppearanceSettings,
+    #[serde(default)]
+    pub general: GeneralSettings,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { schema: 1, notebooks_root: default_notebooks_root(), ink: InkSettings::default() }
+        Self {
+            schema: 1,
+            notebooks_root: default_notebooks_root(),
+            ink: InkSettings::default(),
+            page: PageDefaults::default(),
+            appearance: AppearanceSettings::default(),
+            general: GeneralSettings::default(),
+        }
+    }
+}
+
+/// What opens when the app starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnLaunch {
+    #[default]
+    LastNote,
+    NewNote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct GeneralSettings {
+    pub on_launch: OnLaunch,
+}
+
+/// The note open when the app last closed (state dir, per machine).
+pub fn load_last_note(state_dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(state_dir.join("last-note")).ok()?;
+    let p = PathBuf::from(text.trim());
+    p.is_file().then_some(p)
+}
+
+pub fn save_last_note(state_dir: &Path, note: &Path) {
+    let _ = std::fs::create_dir_all(state_dir);
+    let _ = crate::atomic::atomic_write(&state_dir.join("last-note"), note.to_string_lossy().as_bytes());
+}
+
+/// Which page the canvas shows normally (the toolbar's invert button still
+/// flips it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PageColor {
+    /// Dark page on dark themes, white page on light themes.
+    #[default]
+    Theme,
+    /// Always a white page.
+    Light,
+    /// Always a dark page.
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    pub page_color: PageColor,
+}
+
+/// Defaults for newly created notes (existing notes keep their own).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct PageDefaults {
+    pub background: omascratch_core::PageBackground,
+    /// Text size for new text boxes.
+    pub text_size: f64,
+}
+
+impl Default for PageDefaults {
+    fn default() -> Self {
+        Self { background: omascratch_core::PageBackground::default(), text_size: 18.0 }
     }
 }
 
@@ -245,6 +321,17 @@ mod root_tests {
         s2.ink.mouse_draws = false;
         let back: Settings = toml::from_str(&toml::to_string_pretty(&s2).unwrap()).unwrap();
         assert_eq!(back.ink, s2.ink);
+    }
+
+    #[test]
+    fn last_note_round_trip_ignores_missing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let note = tmp.path().join("a.omanote");
+        std::fs::write(&note, b"x").unwrap();
+        save_last_note(tmp.path(), &note);
+        assert_eq!(load_last_note(tmp.path()), Some(note.clone()));
+        std::fs::remove_file(&note).unwrap();
+        assert_eq!(load_last_note(tmp.path()), None, "deleted note is not reopened");
     }
 
     #[test]

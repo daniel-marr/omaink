@@ -12,7 +12,8 @@ use gtk4::{gio, glib, prelude::*};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use omascratch_store::{self as store, PressureCurve, Settings, SideButton, Smoothing};
+use omascratch_core::BackgroundKind;
+use omascratch_store::{self as store, OnLaunch, PageColor, PressureCurve, Settings, SideButton, Smoothing};
 
 /// Show a message dialog over `parent`.
 fn alert(parent: &impl IsA<gtk::Widget>, heading: &str, body: &str) {
@@ -211,6 +212,99 @@ pub fn present_settings(
         ink.add(&row);
     }
     page.add(&ink);
+
+    // -- New page defaults --
+    let pagegrp = adw::PreferencesGroup::new();
+    pagegrp.set_title("New pages");
+    pagegrp.set_description(Some("Used for notes you create from now on. Change an existing note from the toolbar's page button."));
+    {
+        let cb = on_changed.clone();
+        pagegrp.add(&choice_row(
+            "Background",
+            "",
+            &[("Blank", BackgroundKind::None), ("Ruled", BackgroundKind::Rules), ("Grid", BackgroundKind::Grid)],
+            current.page.background.kind,
+            move |v| update(&cb, |s| s.page.background.kind = v),
+        ));
+    }
+    {
+        let cb = on_changed.clone();
+        pagegrp.add(&choice_row(
+            "Line spacing",
+            "For ruled and grid pages",
+            &[("Narrow", 24.0), ("Standard", 32.0), ("Wide", 44.0)],
+            current.page.background.spacing,
+            move |v| update(&cb, |s| s.page.background.spacing = v),
+        ));
+    }
+    {
+        let row = adw::SwitchRow::new();
+        row.set_title("Margin line");
+        row.set_active(current.page.background.margin);
+        let cb = on_changed.clone();
+        row.connect_active_notify(move |r| {
+            let on = r.is_active();
+            update(&cb, |s| s.page.background.margin = on);
+        });
+        pagegrp.add(&row);
+    }
+    {
+        let cb = on_changed.clone();
+        pagegrp.add(&choice_row(
+            "Text size",
+            "Starting size for new text boxes",
+            &[("12", 12.0), ("14", 14.0), ("16", 16.0), ("18", 18.0), ("22", 22.0), ("26", 26.0), ("32", 32.0)],
+            current.page.text_size,
+            move |v| update(&cb, |s| s.page.text_size = v),
+        ));
+    }
+    page.add(&pagegrp);
+
+    // -- Appearance --
+    let look = adw::PreferencesGroup::new();
+    look.set_title("Appearance");
+    {
+        let cb = on_changed.clone();
+        look.add(&choice_row(
+            "Page color",
+            "The toolbar's invert button still flips it",
+            &[("Follow theme", PageColor::Theme), ("Always light", PageColor::Light), ("Always dark", PageColor::Dark)],
+            current.appearance.page_color,
+            move |v| update(&cb, |s| s.appearance.page_color = v),
+        ));
+    }
+    page.add(&look);
+
+    // -- General --
+    let general = adw::PreferencesGroup::new();
+    general.set_title("General");
+    {
+        let cb = on_changed.clone();
+        general.add(&choice_row(
+            "On launch",
+            "Takes effect next time OmaScratch starts",
+            &[("Reopen last note", OnLaunch::LastNote), ("Start a new note", OnLaunch::NewNote)],
+            current.general.on_launch,
+            move |v| update(&cb, |s| s.general.on_launch = v),
+        ));
+    }
+    page.add(&general);
+
+    // -- About --
+    let about = adw::PreferencesGroup::new();
+    about.set_title("About");
+    let info = |title: &str, value: &str| {
+        let row = adw::ActionRow::new();
+        row.set_title(title);
+        row.set_subtitle(&glib::markup_escape_text(value));
+        row.set_subtitle_selectable(true);
+        row
+    };
+    about.add(&info("OmaScratch", &format!("Version {} · GPL-3.0-or-later", env!("CARGO_PKG_VERSION"))));
+    about.add(&info("Settings file", &store::config_dir().join("settings.toml").display().to_string()));
+    about.add(&info("App state", &store::state_dir().display().to_string()));
+    about.add(&info("Cache", &store::cache_dir().display().to_string()));
+    page.add(&about);
 
     dialog.add(&page);
     dialog.present(Some(parent));

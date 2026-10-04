@@ -33,11 +33,12 @@ pub fn run() -> glib::ExitCode {
 
 fn build_window(app: &adw::Application) {
     let canvas = CanvasView::default();
-    canvas.apply_ink_settings(omascratch_store::Settings::load_or_default(&omascratch_store::config_dir()).ink);
+    apply_settings(&canvas, &omascratch_store::Settings::load_or_default(&omascratch_store::config_dir()));
 
     let library = Library::open();
     library.ensure_notebook();
-    let first_note = first_note_path(&library);
+    let first_note = startup_note(&library);
+    omascratch_store::save_last_note(&omascratch_store::state_dir(), &first_note);
     let storage = Storage::open(first_note);
     storage.load_into_canvas(&canvas);
     storage.attach_autosave(&canvas);
@@ -177,6 +178,7 @@ fn build_window(app: &adw::Application) {
         sidebar.set_on_open_note(move |path| {
             if let Some(canvas) = canvas_w.upgrade() {
                 let _ = storage.switch_to(path, &canvas);
+                omascratch_store::save_last_note(&omascratch_store::state_dir(), path);
             }
         });
     }
@@ -255,6 +257,7 @@ fn build_window(app: &adw::Application) {
         let storage = storage.clone();
         let canvas = canvas.clone();
         let root = library.root.clone();
+        let theme_mgr = theme_mgr.clone();
         sidebar.set_on_settings(move || {
             let Some(w) = win.upgrade() else { return };
             let win = win.clone();
@@ -277,12 +280,17 @@ fn build_window(app: &adw::Application) {
                         d.present(Some(&w));
                         return;
                     }
+                    omascratch_store::save_last_note(&omascratch_store::state_dir(), &storage.current_path());
                     w.destroy();
                     build_window(&app);
                 }}),
                 std::rc::Rc::new({
                     let canvas = canvas.clone();
-                    move |s: &omascratch_store::Settings| canvas.apply_ink_settings(s.ink)
+                    let theme_mgr = theme_mgr.clone();
+                    move |s: &omascratch_store::Settings| {
+                        apply_settings(&canvas, s);
+                        theme_mgr.refresh_canvas();
+                    }
                 }),
             );
         });
@@ -296,6 +304,53 @@ fn build_window(app: &adw::Application) {
     if crate::perf::enabled() {
         canvas.run_perf_bench();
     }
+}
+
+/// Apply everything in Settings except the notebooks folder (live).
+fn apply_settings(canvas: &CanvasView, s: &omascratch_store::Settings) {
+    theme::set_page_color(s.appearance.page_color);
+    canvas.apply_ink_settings(s.ink);
+    omascratch_store::set_new_note_background(s.page.background);
+    canvas.set_default_text_size(s.page.text_size);
+}
+
+/// The note to open at launch (Settings → General → On launch).
+fn startup_note(library: &Rc<Library>) -> std::path::PathBuf {
+    use omascratch_store as store;
+    let settings = store::Settings::load_or_default(&store::config_dir());
+    let last = store::load_last_note(&store::state_dir()).filter(|p| p.starts_with(&library.root));
+    // The last note's notebook: <root>/<notebook>/notes/<id>.omanote.
+    if let Some(name) = last
+        .as_ref()
+        .and_then(|p| p.parent()?.parent()?.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+    {
+        library.select_notebook(&name);
+    }
+    match settings.general.on_launch {
+        store::OnLaunch::LastNote => {
+            if let Some(p) = last {
+                return p;
+            }
+        }
+        store::OnLaunch::NewNote => {
+            // Reuse a still-blank "Untitled" note rather than piling them up.
+            if let Some(p) = last.filter(|p| {
+                store::read_note(p).is_ok_and(|d| {
+                    d.title == "Untitled"
+                        && d.content.strokes.is_empty()
+                        && d.content.images.is_empty()
+                        && d.content.texts.is_empty()
+                })
+            }) {
+                return p;
+            }
+            if let Some((_, path)) = library.new_note(None) {
+                return path;
+            }
+        }
+    }
+    first_note_path(library)
 }
 
 fn first_note_path(library: &Rc<Library>) -> std::path::PathBuf {
@@ -411,7 +466,10 @@ fn install_close_handler(
     let storage = storage.clone();
     let c = canvas.clone();
     window.connect_close_request(move |win| match storage.save_final(&c) {
-        Ok(()) => glib::Propagation::Proceed,
+        Ok(()) => {
+            omascratch_store::save_last_note(&omascratch_store::state_dir(), &storage.current_path());
+            glib::Propagation::Proceed
+        }
         Err(e) => {
             let dialog = adw::AlertDialog::new(
                 Some("Could not save your note"),

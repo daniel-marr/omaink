@@ -2546,6 +2546,11 @@ impl CanvasView {
         self.queue_draw();
     }
 
+    /// New page defaults: the text size new text boxes start with.
+    pub fn set_default_text_size(&self, size: f64) {
+        self.imp().state.borrow_mut().text_font_size = size;
+    }
+
     fn mouse_begin(&self, x: f64, y: f64) {
         if self.text_press(x, y) {
             return;

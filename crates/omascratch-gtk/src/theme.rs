@@ -47,7 +47,42 @@ fn with_alpha(c: Rgba, a: f32) -> gtk::gdk::RGBA {
     gtk::gdk::RGBA::new(c.r, c.g, c.b, a)
 }
 
+thread_local! {
+    /// Settings → Appearance → Page color.
+    static PAGE_COLOR: std::cell::Cell<store::PageColor> = const { std::cell::Cell::new(store::PageColor::Theme) };
+}
+
+/// Set the page color mode; call `Manager::refresh_canvas` to apply it.
+pub fn set_page_color(mode: store::PageColor) {
+    PAGE_COLOR.with(|c| c.set(mode));
+}
+
+/// The theme's canvas palette, with the normal/inverted pages swapped when
+/// the page color setting asks for the opposite of the theme's polarity.
 fn canvas_palette(p: &Palette) -> CanvasPalette {
+    let pal = theme_canvas_palette(p);
+    let want_dark = match PAGE_COLOR.with(|c| c.get()) {
+        store::PageColor::Theme => p.dark,
+        store::PageColor::Light => false,
+        store::PageColor::Dark => true,
+    };
+    if want_dark == p.dark {
+        return pal;
+    }
+    CanvasPalette {
+        bg: pal.bg_inv,
+        bg_inv: pal.bg,
+        ink: pal.ink_inv,
+        ink_inv: pal.ink,
+        accent: pal.accent,
+        rule: pal.rule_inv,
+        rule_inv: pal.rule,
+        margin: pal.margin_inv,
+        margin_inv: pal.margin,
+    }
+}
+
+fn theme_canvas_palette(p: &Palette) -> CanvasPalette {
     // A light page is always pure white (#ffffff): the inverted page on dark
     // themes, and the normal page on light themes. A light theme's inverted
     // page stays dark (its brightest ink color).
@@ -136,6 +171,16 @@ impl Manager {
             }
         }
         mgr
+    }
+
+    /// Re-apply the canvas palette (after the page color setting changes).
+    pub fn refresh_canvas(&self) {
+        if let Some(canvas) = self.canvas.upgrade() {
+            canvas.set_palette(canvas_palette(&self.current.borrow()));
+        }
+        if let Some(toolbar) = self.toolbar.borrow().as_ref() {
+            toolbar.refresh_theme();
+        }
     }
 
     /// The toolbar re-renders its pen glyphs on theme change.

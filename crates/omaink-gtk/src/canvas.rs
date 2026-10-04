@@ -166,6 +166,11 @@ pub struct State {
     on_zoom: Option<Box<dyn Fn(f64)>>,
     /// Shell hook: stylus barrel button clicked — toolbar toggles the eraser.
     on_eraser_toggle: Option<Box<dyn Fn()>>,
+    /// Shell hook: barrel button held (true) / released (false) — the
+    /// toolbar shows the eraser only while held.
+    on_eraser_hold: Option<std::rc::Rc<dyn Fn(bool)>>,
+    /// The barrel button is currently held (hold-for-eraser).
+    barrel_held: bool,
     /// World coordinate at the widget's top-left corner.
     offset: kurbo::Vec2,
     zoom: f64,
@@ -176,6 +181,9 @@ pub struct State {
     cur_color: SemanticColor,
     cur_width: f64,
     eraser_kind: EraserKind,
+    /// Eraser kind for the current drag when it differs from the toolbar's
+    /// (the pen's eraser end always erases whole strokes).
+    erase_kind_override: Option<EraserKind>,
     eraser_radius: f64,
     /// Strokes the current eraser drag affects (stroke eraser: hidden live;
     /// area eraser: previewed as fragments). Committed on release.
@@ -264,6 +272,8 @@ impl Default for State {
             on_change: None,
             on_zoom: None,
             on_eraser_toggle: None,
+            on_eraser_hold: None,
+            barrel_held: false,
             offset: kurbo::Vec2::ZERO,
             zoom: 1.0,
             live: None,
@@ -272,6 +282,7 @@ impl Default for State {
             cur_color: SemanticColor::Foreground,
             cur_width: 3.5,
             eraser_kind: EraserKind::Stroke,
+            erase_kind_override: None,
             eraser_radius: 12.0,
             erasing: false,
             live_erased: HashSet::new(),
@@ -606,6 +617,25 @@ impl CanvasView {
 
     pub fn set_on_eraser_toggle(&self, f: impl Fn() + 'static) {
         self.imp().state.borrow_mut().on_eraser_toggle = Some(Box::new(f));
+    }
+
+    pub fn set_on_eraser_hold(&self, f: impl Fn(bool) + 'static) {
+        self.imp().state.borrow_mut().on_eraser_hold = Some(std::rc::Rc::new(f));
+    }
+
+    /// Barrel button held/released (hold-for-eraser). Idempotent.
+    fn set_barrel_held(&self, held: bool) {
+        let hook = {
+            let mut st = self.imp().state.borrow_mut();
+            if st.barrel_held == held {
+                return;
+            }
+            st.barrel_held = held;
+            st.on_eraser_hold.clone()
+        };
+        if let Some(hook) = hook {
+            hook(held);
+        }
     }
 
     fn fire_eraser_toggle(&self) {
@@ -1327,6 +1357,8 @@ impl CanvasView {
         }
         self.imp().state.borrow_mut().active = tool;
         self.set_cursor_from_name(if tool == ActiveTool::InsertSpace { Some("row-resize") } else { None });
+        // Tool-specific overlays (the eraser ring) must update now.
+        self.queue_draw();
     }
 
     pub fn active_tool(&self) -> ActiveTool {
@@ -1340,6 +1372,9 @@ impl CanvasView {
         st.active = tool_to_active(tool);
         st.cur_color = color;
         st.cur_width = width;
+        drop(st);
+        self.set_cursor_from_name(None);
+        self.queue_draw();
     }
 
     /// Activate the shape tool with the given shape kind.
@@ -1348,6 +1383,9 @@ impl CanvasView {
         let mut st = self.imp().state.borrow_mut();
         st.active = ActiveTool::Shape;
         st.shape_kind = kind;
+        drop(st);
+        self.set_cursor_from_name(None);
+        self.queue_draw();
     }
 
     /// Install a new canvas palette (theme switch). Clears the render cache.
@@ -1852,6 +1890,7 @@ impl CanvasView {
         st.eraser_kind = kind;
         st.eraser_radius = radius;
         drop(st);
+        self.set_cursor_from_name(None);
         self.queue_draw();
     }
 
@@ -1888,6 +1927,41 @@ impl CanvasView {
 
     fn setup_input(&self) {
         // Stylus: the primary input path. Uncompressed history via backlog().
+        // Pen diagnostics (OMAINK_DEBUG_PEN=1): log raw button/proximity
+        // events with their device tool and button masks. Passive.
+        if std::env::var_os("OMAINK_DEBUG_PEN").is_some() {
+            let log = gtk::EventControllerLegacy::new();
+            log.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let t0 = Instant::now();
+            log.connect_event(move |_, ev| {
+                use gdk::EventType as E;
+                let kind = ev.event_type();
+                if !matches!(
+                    kind,
+                    E::ButtonPress | E::ButtonRelease | E::ProximityIn | E::ProximityOut | E::TouchBegin | E::KeyPress
+                ) {
+                    return glib::Propagation::Proceed;
+                }
+                let button = ev.downcast_ref::<gdk::ButtonEvent>().map(|b| b.button());
+                let tool = ev.device_tool().map(|t| format!("{:?}", t.tool_type()));
+                let m = ev.modifier_state();
+                let key = ev.downcast_ref::<gdk::KeyEvent>().map(|k| format!("{:?}", k.keyval()));
+                let dev = ev.device().map(|d| d.name().to_string()).unwrap_or_default();
+                eprintln!(
+                    "[pen {:7.2}s] {:?} button={:?} key={:?} tool={:?} dev={dev:?} masks b1={} b2={} b3={}",
+                    t0.elapsed().as_secs_f64(),
+                    kind,
+                    button,
+                    key,
+                    tool,
+                    m.contains(gdk::ModifierType::BUTTON1_MASK) as u8,
+                    m.contains(gdk::ModifierType::BUTTON2_MASK) as u8,
+                    m.contains(gdk::ModifierType::BUTTON3_MASK) as u8,
+                );
+                glib::Propagation::Proceed
+            });
+            self.add_controller(log);
+        }
         let stylus = gtk::GestureStylus::new();
         let weak = self.downgrade();
         stylus.connect_down(move |g, x, y| {
@@ -2002,8 +2076,43 @@ impl CanvasView {
         pan.connect_drag_end(move |_, _, _| {});
         self.add_controller(pan);
 
-        // Stylus barrel click (arrives as middle/secondary with a device
-        // tool): toggle the eraser instead of panning or context-clicking.
+        // Stylus barrel button (middle/secondary with a device tool), seen as
+        // raw press/release so holding works: Hold = eraser while held
+        // (released also when the pen leaves proximity), Toggle = flip on
+        // press. Consumed so it never pans or opens a context menu.
+        {
+            let barrel = gtk::EventControllerLegacy::new();
+            barrel.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let weak = self.downgrade();
+            barrel.connect_event(move |_, ev| {
+                use gdk::EventType as E;
+                let Some(view) = weak.upgrade() else { return glib::Propagation::Proceed };
+                let kind = ev.event_type();
+                if kind == E::ProximityOut {
+                    view.set_barrel_held(false);
+                    return glib::Propagation::Proceed;
+                }
+                if !matches!(kind, E::ButtonPress | E::ButtonRelease) || ev.device_tool().is_none() {
+                    return glib::Propagation::Proceed;
+                }
+                let button = ev.downcast_ref::<gdk::ButtonEvent>().map(|b| b.button()).unwrap_or(0);
+                if button != gdk::BUTTON_MIDDLE && button != gdk::BUTTON_SECONDARY {
+                    return glib::Propagation::Proceed;
+                }
+                let mode = view.imp().state.borrow().ink.side_button;
+                match (mode, kind) {
+                    (omaink_store::SideButton::Eraser, E::ButtonPress) => view.set_barrel_held(true),
+                    (omaink_store::SideButton::Eraser, _) => view.set_barrel_held(false),
+                    (omaink_store::SideButton::Toggle, E::ButtonPress) => view.fire_eraser_toggle(),
+                    _ => {}
+                }
+                glib::Propagation::Stop
+            });
+            self.add_controller(barrel);
+        }
+
+        // Mouse right-click on an image opens its menu (stylus barrel
+        // events are handled above).
         for button in [gdk::BUTTON_MIDDLE, gdk::BUTTON_SECONDARY] {
             let click = gtk::GestureClick::new();
             click.set_button(button);
@@ -2012,12 +2121,7 @@ impl CanvasView {
             click.connect_pressed(move |g, _, x, y| {
                 let Some(view) = weak.upgrade() else { return };
                 if g.current_event().and_then(|ev| ev.device_tool()).is_some() {
-                    // Claimed either way so a barrel click never pans or
-                    // opens a context menu.
                     g.set_state(gtk::EventSequenceState::Claimed);
-                    if view.imp().state.borrow().ink.side_button == omaink_store::SideButton::Eraser {
-                        view.fire_eraser_toggle();
-                    }
                     return;
                 }
                 // Mouse right-click on an image: its context menu.
@@ -2312,10 +2416,14 @@ impl CanvasView {
             && state.intersects(gdk::ModifierType::BUTTON2_MASK | gdk::ModifierType::BUTTON3_MASK);
         st.shift_down = state.contains(gdk::ModifierType::SHIFT_MASK);
         let mut force_erase = barrel;
+        st.erase_kind_override = None;
         if let Some(t) = g.device_tool() {
             st.debug.tool_name = format!("{:?}", t.tool_type());
             if t.tool_type() == gdk::DeviceToolType::Eraser {
+                // The pen's eraser end (on some pens: a side button) always
+                // erases whole strokes, whatever the toolbar eraser is set to.
                 force_erase = true;
+                st.erase_kind_override = Some(EraserKind::Stroke);
             }
         }
         st.debug.buttons = format!(
@@ -2604,10 +2712,15 @@ impl CanvasView {
         st.bounds_rev = rev;
     }
 
+    /// The eraser kind in effect for the current drag.
+    fn erase_kind(st: &State) -> EraserKind {
+        st.erase_kind_override.unwrap_or(st.eraser_kind)
+    }
+
     fn erase_at(st: &mut State, wx: f64, wy: f64) {
         let radius = st.eraser_radius;
         let p = kurbo::Point::new(wx, wy);
-        if st.eraser_kind == EraserKind::Area {
+        if Self::erase_kind(st) == EraserKind::Area {
             // Thin the path: a new point only matters once it has moved a
             // fraction of the radius.
             let far_enough = st
@@ -3111,7 +3224,7 @@ impl CanvasView {
                 })
                 .collect();
             let mut replacements: Vec<Stroke> = Vec::new();
-            if st.eraser_kind == EraserKind::Area && !st.erase_path.is_empty() {
+            if Self::erase_kind(&st) == EraserKind::Area && !st.erase_path.is_empty() {
                 for orig in &removed {
                     let fragments = omaink_ink::erase_samples(
                         &orig.points,
@@ -3327,7 +3440,7 @@ impl CanvasView {
             // Strokes the current eraser drag affects: stroke eraser hides
             // them; area eraser previews the surviving fragments live.
             if st.live_erased.contains(&id) {
-                if st.eraser_kind == EraserKind::Area && st.erasing && !st.erase_path.is_empty() {
+                if Self::erase_kind(&st) == EraserKind::Area && st.erasing && !st.erase_path.is_empty() {
                     if let Some(i) = st.session.content.stroke_index(id) {
                         let s = &st.session.content.strokes[i];
                         let frags = omaink_ink::erase_samples(

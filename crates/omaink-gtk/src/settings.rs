@@ -199,8 +199,12 @@ pub fn present_settings(
         let cb = on_changed.clone();
         ink.add(&choice_row(
             "Pen side button",
-            "Eraser: click to switch to the eraser, hold while drawing to erase",
-            &[("Eraser", SideButton::Eraser), ("Off", SideButton::Off)],
+            "What the pen's side button does",
+            &[
+                ("Hold for eraser", SideButton::Eraser),
+                ("Click to toggle eraser", SideButton::Toggle),
+                ("Off", SideButton::Off),
+            ],
             current.ink.side_button,
             move |v| update(&cb, |s| s.ink.side_button = v),
         ));

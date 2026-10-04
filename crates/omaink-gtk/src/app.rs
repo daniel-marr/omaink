@@ -60,9 +60,12 @@ fn build_window(app: &adw::Application) {
     let draw_toolbar = crate::toolbar::build(&canvas);
     theme_mgr.attach_toolbar(&draw_toolbar);
     {
-        // Stylus barrel click toggles the eraser (and back).
+        // Stylus barrel button: hold for the eraser, or click to toggle it
+        // (Settings → Pen & ink → Pen side button).
         let tb = draw_toolbar.clone();
         canvas.set_on_eraser_toggle(move || tb.toggle_eraser());
+        let tb = draw_toolbar.clone();
+        canvas.set_on_eraser_hold(move |held| tb.hold_eraser(held));
     }
     {
         // Pasted images: bytes saved beside the open note; afterwards the

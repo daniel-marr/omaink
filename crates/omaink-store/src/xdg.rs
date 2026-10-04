@@ -200,9 +200,12 @@ pub enum Smoothing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SideButton {
-    /// Click toggles the eraser; hold while drawing to erase.
+    /// Hold for the eraser; releasing (or lifting the pen out of range)
+    /// returns to the previous tool.
     #[default]
     Eraser,
+    /// Click to switch to the eraser, click again to switch back.
+    Toggle,
     /// Ignored.
     Off,
 }

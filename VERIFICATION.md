@@ -89,6 +89,15 @@ Pen and pencil strokes switched from the perfect-freehand outline to a union of 
 
 GPU fill time is not measured by the harness. Highlighters still use the freehand outline.
 
+### Pen side buttons — live acceptance (2026-10-04, user-performed)
+
+XP-Pen Artist 15.6 Pro on the kernel `uclogic` driver (the vendor XP-Pen driver, `xppentablet.service`, was uninstalled by the user: while it ran it remapped the side buttons and none reached the app). Raw events logged with `OMAINK_DEBUG_PEN=1`:
+
+- Lower side button: button 2 with the pen tool (`BTN_STYLUS`). Default setting "Hold for eraser": the toolbar shows the eraser only while held; release or leaving proximity restores the previous tool; the eraser ring clears on release. Confirmed.
+- Upper side button: reported as the pen's eraser end (tool type `Eraser`); erases whole strokes for that stroke, independent of the toolbar eraser type. Confirmed.
+- Normal strokes afterwards draw ink. Confirmed.
+- Not covered: vendor drivers (XP-Pen/Huion apps) that turn buttons into mouse clicks or keys.
+
 ### Image file drag-and-drop — investigated and removed (2026-10-03)
 
 - Diagnostic window-level drop logging showed the user's file manager (Strata, native GTK4) reaches the window with formats `GdkFileList … text/uri-list … application/vnd.portal.filetransfer` but offers **only the MOVE action**. The canvas target deliberately refused MOVE (a completed move lets the source delete the original file), so drops were rejected.

@@ -658,6 +658,8 @@ struct Inner {
     mode: Cell<Mode>,
     /// Last non-eraser mode, restored when the barrel button toggles back.
     prev_mode: Cell<Mode>,
+    /// The eraser is showing only because the pen's side button is held.
+    held_eraser: Cell<bool>,
     /// Pen-chip reordering: armed by long-press (or right-click drag),
     /// source index while dragging, and a one-shot click suppressor so a
     /// long-press that ends without a drag doesn't also select the pen.
@@ -730,6 +732,7 @@ impl Toolbar {
             on_background: RefCell::new(None),
             mode: Cell::new(Mode::Pen(st.active_pen.min(st.pens.len().saturating_sub(1)))),
             prev_mode: Cell::new(Mode::Pen(0)),
+            held_eraser: Cell::new(false),
             reorder_armed: Cell::new(None),
             drag_src: Cell::new(None),
             suppress_click: Cell::new(false),
@@ -1096,7 +1099,20 @@ impl Toolbar {
         self.set_mode(Mode::Select);
     }
 
-    /// Stylus barrel button: flip between the eraser and the previous tool.
+    /// Stylus barrel button held: show the eraser until it's released,
+    /// then return to the previous tool.
+    pub fn hold_eraser(&self, held: bool) {
+        if held {
+            if self.inner.mode.get() != Mode::Eraser {
+                self.inner.held_eraser.set(true);
+                self.set_mode(Mode::Eraser);
+            }
+        } else if self.inner.held_eraser.replace(false) && self.inner.mode.get() == Mode::Eraser {
+            self.set_mode(self.inner.prev_mode.get());
+        }
+    }
+
+    /// Stylus barrel button (toggle setting): flip between the eraser and the previous tool.
     pub fn toggle_eraser(&self) {
         if self.inner.mode.get() == Mode::Eraser {
             self.set_mode(self.inner.prev_mode.get());

@@ -446,13 +446,17 @@ fn now_unix_ms() -> u64 {
 
 /// Resolve a semantic color to an on-screen RGBA. Highlighter strokes render
 /// translucent. (M5's theme adapter will replace the fixed Foreground/Accent.)
+/// Paper margin line, in world units from the page's left edge.
+const MARGIN_X: f64 = 90.0;
+
 /// Largest scroll offsets (world units) for a growing page: the content's
-/// bottom can rise to 75% of the view (a quarter screen of blank page
+/// bottom can rise to the middle of the view (half a screen of blank page
 /// below it), and sideways scrolling only opens once content passes the
-/// right edge (plus a small pad).
+/// right edge, leaving the same room on the right as the margin line
+/// leaves on the left.
 fn page_scroll_limits(content: Option<kurbo::Rect>, view: kurbo::Size) -> (f64, f64) {
-    const SPACE_BELOW: f64 = 0.25;
-    const PAD_RIGHT: f64 = 40.0;
+    const SPACE_BELOW: f64 = 0.5;
+    const PAD_RIGHT: f64 = MARGIN_X;
     let (right, bottom) = content.map_or((0.0, 0.0), |r| (r.x1, r.y1));
     (
         (right + PAD_RIGHT - view.width).max(0.0),
@@ -471,12 +475,13 @@ mod page_tests {
         // Content in the top half of a screen-wide page: nowhere to scroll.
         let small = kurbo::Rect::new(100.0, 100.0, 800.0, 400.0);
         assert_eq!(page_scroll_limits(Some(small), view), (0.0, 0.0));
-        // Tall content: scroll until its bottom sits 75% down the view.
+        // Tall content: scroll until its bottom sits halfway down the view.
         let tall = kurbo::Rect::new(100.0, 100.0, 800.0, 3000.0);
-        assert_eq!(page_scroll_limits(Some(tall), view), (0.0, 3000.0 - 600.0));
-        // Content past the right edge opens sideways scrolling just enough.
+        assert_eq!(page_scroll_limits(Some(tall), view), (0.0, 3000.0 - 400.0));
+        // Content past the right edge opens sideways scrolling, leaving the
+        // margin-line distance free on the right.
         let wide = kurbo::Rect::new(100.0, 100.0, 1500.0, 400.0);
-        assert_eq!(page_scroll_limits(Some(wide), view).0, 1500.0 + 40.0 - 1000.0);
+        assert_eq!(page_scroll_limits(Some(wide), view).0, 1500.0 + MARGIN_X - 1000.0);
     }
 }
 
@@ -3222,11 +3227,10 @@ impl CanvasView {
             snapshot.append_stroke(&pb.to_path(), &gsk::Stroke::new(lw), &rule);
             if st.background.margin {
                 // Indented like paper: the margin line sits in from the left.
-                const MARGIN_X: f32 = 90.0;
                 let margin = if st.inverted { st.palette.margin_inv } else { st.palette.margin };
                 let mb = gsk::PathBuilder::new();
-                mb.move_to(MARGIN_X, visible.y0 as f32);
-                mb.line_to(MARGIN_X, visible.y1 as f32);
+                mb.move_to(MARGIN_X as f32, visible.y0 as f32);
+                mb.line_to(MARGIN_X as f32, visible.y1 as f32);
                 snapshot.append_stroke(&mb.to_path(), &gsk::Stroke::new(lw * 1.5), &margin);
             }
         }

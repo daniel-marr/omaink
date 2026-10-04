@@ -15,6 +15,11 @@ use libadwaita::prelude::*;
 use omaink_core::BackgroundKind;
 use omaink_store::{self as store, OnLaunch, PageColor, PressureCurve, Settings, SideButton, Smoothing};
 
+/// The app name as Pango markup. In the UI font (Adwaita Sans, an Inter
+/// derivative) a capital I is a bare bar that reads as a lowercase l
+/// ("Omalnk"); Inter's `cv08` gives the I serifs.
+pub const NAME_MARKUP: &str = "Oma<span font_features=\"cv08\">I</span>nk";
+
 /// Show a message dialog over `parent`.
 fn alert(parent: &impl IsA<gtk::Widget>, heading: &str, body: &str) {
     let d = adw::AlertDialog::new(Some(heading), Some(body));
@@ -134,11 +139,12 @@ pub fn present_settings(
                 let confirm = adw::AlertDialog::new(
                     Some("Switch notebooks folder?"),
                     Some(&format!(
-                        "OmaInk will save and load notebooks in\n{}\n\nNotebooks in {} stay where they are — nothing is moved or deleted.",
-                        new_root.display(),
-                        current.display()
+                        "{NAME_MARKUP} will save and load notebooks in\n{}\n\nNotebooks in {} stay where they are — nothing is moved or deleted.",
+                        glib::markup_escape_text(&new_root.display().to_string()),
+                        glib::markup_escape_text(&current.display().to_string())
                     )),
                 );
+                confirm.set_body_use_markup(true);
                 confirm.add_response("cancel", "Cancel");
                 confirm.add_response("switch", "Switch folder");
                 confirm.set_response_appearance("switch", adw::ResponseAppearance::Suggested);
@@ -282,7 +288,7 @@ pub fn present_settings(
         let cb = on_changed.clone();
         general.add(&choice_row(
             "On launch",
-            "Takes effect next time OmaInk starts",
+            "Takes effect the next time the app starts",
             &[("Reopen last note", OnLaunch::LastNote), ("Start a new note", OnLaunch::NewNote)],
             current.general.on_launch,
             move |v| update(&cb, |s| s.general.on_launch = v),
@@ -300,7 +306,7 @@ pub fn present_settings(
         row.set_subtitle_selectable(true);
         row
     };
-    about.add(&info("OmaInk", &format!("Version {} · GPL-3.0-or-later", env!("CARGO_PKG_VERSION"))));
+    about.add(&info(NAME_MARKUP, &format!("Version {} · GPL-3.0-or-later", env!("CARGO_PKG_VERSION"))));
     about.add(&info("Settings file", &store::config_dir().join("settings.toml").display().to_string()));
     about.add(&info("App state", &store::state_dir().display().to_string()));
     about.add(&info("Cache", &store::cache_dir().display().to_string()));
@@ -318,9 +324,10 @@ pub fn present_welcome(app: &adw::Application, on_done: Rc<dyn Fn(PathBuf)>) {
     let chosen = Rc::new(std::cell::RefCell::new(store::default_notebooks_root()));
 
     let dialog = adw::AlertDialog::new(
-        Some("Welcome to OmaInk"),
+        Some(&format!("Welcome to {NAME_MARKUP}")),
         Some("Where should your notebooks be saved? Each notebook becomes a folder in here. You can change this later in Settings."),
     );
+    dialog.set_heading_use_markup(true);
     let path_label = gtk::Label::new(Some(&chosen.borrow().display().to_string()));
     path_label.set_wrap(true);
     path_label.set_selectable(true);

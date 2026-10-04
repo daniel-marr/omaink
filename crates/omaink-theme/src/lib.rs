@@ -234,9 +234,6 @@ window {{
 .header-icon image {{
     -gtk-icon-size: 15px;
 }}
-.indent-line {{
-    background-color: {muted};
-}}
 .notebook-switcher {{
     color: {fg};
     font-size: 0.9rem;

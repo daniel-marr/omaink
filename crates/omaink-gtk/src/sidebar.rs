@@ -452,21 +452,12 @@ impl Sidebar {
             Row::Note { title, depth, conflict, .. } => (title.clone(), *depth, *conflict),
         };
 
-        // Indent guides: one per ancestor level. Each is an INDENT-wide cell
-        // with a 1px line centered in it, so the line sits directly under the
-        // parent folder's chevron (also INDENT wide and centered).
+        // Indent: one INDENT-wide blank cell per ancestor level (no guide
+        // lines), so notes sit under their folder's title.
         for _ in 0..depth {
-            // Fixed-width cell with a 1px line placed at its horizontal center
-            // via a left margin (no hexpand, which would make the cell greedy).
             let cell = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             cell.set_size_request(INDENT, -1);
             cell.set_hexpand(false);
-            let line = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            line.set_size_request(1, -1);
-            line.set_vexpand(true);
-            line.set_margin_start(INDENT / 2);
-            line.add_css_class("indent-line");
-            cell.append(&line);
             hbox.append(&cell);
         }
 

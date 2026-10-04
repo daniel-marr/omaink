@@ -4,6 +4,8 @@
 
 Ink-first notes for Omarchy: notebooks, folders and notes on a growing page, built around fluid stylus input (pressure and tilt via Wayland tablet-v2), styled from the active Omarchy theme, with a synced-folder-safe file format.
 
+OmaInk is an independent community project, not affiliated with or endorsed by Omarchy. The OMA logo is a trademark of the Omarchy Foundation.
+
 > **Alpha.** OmaInk is early software for testing and feedback. Expect rough edges and changes; keep backups of notes you care about. Please report problems via [GitHub Issues](../../issues).
 
 Status: alpha (0.1.0-alpha.1). Daily-driven on one machine; not yet tested elsewhere.

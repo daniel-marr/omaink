@@ -120,6 +120,24 @@ fn radius_for(width: f64, thinning: f64, pressure: f64) -> f64 {
     (width * (0.5 - thinning * (0.5 - pressure))).max(width * 0.08)
 }
 
+/// Smoothing passes for pen/pencil strokes (user setting: light 0,
+/// normal 1, strong 3). Read at render time.
+static SMOOTHING_PASSES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+/// Set the smoothing strength (number of 3-tap passes). Callers must
+/// re-render cached strokes afterwards.
+pub fn set_smoothing_passes(n: u8) {
+    SMOOTHING_PASSES.store(n.min(6), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn smooth_n(points: &[InkPoint]) -> Vec<InkPoint> {
+    let mut pts = points.to_vec();
+    for _ in 0..SMOOTHING_PASSES.load(std::sync::atomic::Ordering::Relaxed) {
+        pts = smooth(&pts);
+    }
+    pts
+}
+
 /// 3-tap moving average over positions and pressure, ends pinned: removes
 /// sensor jitter without shortening the stroke or lagging behind the pen.
 fn smooth(points: &[InkPoint]) -> Vec<InkPoint> {
@@ -204,7 +222,7 @@ fn push_capsule(path: &mut BezPath, a: kurbo::Point, ra: f64, b: kurbo::Point, r
 /// Pen/pencil: union of pressure-sized round segments along the samples.
 fn stamped_path(points: &[InkPoint], tool: Tool, width: f64, simulate_pressure: bool) -> BezPath {
     let mut path = BezPath::new();
-    let pts = smooth(&clean_samples(points, width));
+    let pts = smooth_n(&clean_samples(points, width));
     if pts.is_empty() {
         return path;
     }

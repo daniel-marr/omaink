@@ -25,4 +25,4 @@ pub use library::{
     reload_notebook, rename_folder, rename_note, rename_notebook, set_folder_order, set_note_order,
 };
 pub use schema::{NoteDoc, NOTE_SCHEMA};
-pub use xdg::{cache_dir, config_dir, default_notebooks_root, state_dir, validate_notebooks_root, Settings, ViewState};
+pub use xdg::{cache_dir, config_dir, default_notebooks_root, state_dir, validate_notebooks_root, InkSettings, PressureCurve, Settings, SideButton, Smoothing, ViewState};

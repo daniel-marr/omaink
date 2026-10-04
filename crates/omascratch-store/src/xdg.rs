@@ -42,11 +42,79 @@ pub struct Settings {
     pub schema: u32,
     /// Where notebooks live. Point a sync client at this folder.
     pub notebooks_root: PathBuf,
+    /// Pen & ink preferences (absent in older files → defaults).
+    #[serde(default)]
+    pub ink: InkSettings,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { schema: 1, notebooks_root: default_notebooks_root() }
+        Self { schema: 1, notebooks_root: default_notebooks_root(), ink: InkSettings::default() }
+    }
+}
+
+/// How pen pressure maps to stroke width (applied as samples arrive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PressureCurve {
+    /// Light touch already gives a thick line.
+    Soft,
+    #[default]
+    Normal,
+    /// Needs a firmer press for a thick line.
+    Firm,
+}
+
+impl PressureCurve {
+    /// Exponent applied to normalized pressure (p^γ).
+    pub fn gamma(self) -> f64 {
+        match self {
+            PressureCurve::Soft => 0.6,
+            PressureCurve::Normal => 1.0,
+            PressureCurve::Firm => 1.6,
+        }
+    }
+}
+
+/// How strongly strokes are smoothed when drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Smoothing {
+    Light,
+    #[default]
+    Normal,
+    Strong,
+}
+
+/// What the pen's side (barrel) button does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SideButton {
+    /// Click toggles the eraser; hold while drawing to erase.
+    #[default]
+    Eraser,
+    /// Ignored.
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct InkSettings {
+    pub pressure: PressureCurve,
+    pub smoothing: Smoothing,
+    pub side_button: SideButton,
+    /// Mouse and touch draw (true) or only pan (false).
+    pub mouse_draws: bool,
+}
+
+impl Default for InkSettings {
+    fn default() -> Self {
+        Self {
+            pressure: PressureCurve::Normal,
+            smoothing: Smoothing::Normal,
+            side_button: SideButton::Eraser,
+            mouse_draws: true,
+        }
     }
 }
 
@@ -167,6 +235,17 @@ pub fn validate_notebooks_root(path: &Path, current: Option<&Path>) -> Result<()
 #[cfg(test)]
 mod root_tests {
     use super::*;
+
+    #[test]
+    fn old_settings_files_get_ink_defaults() {
+        let s: Settings = toml::from_str("schema = 1\nnotebooks_root = \"/x\"\n").unwrap();
+        assert_eq!(s.ink, InkSettings::default());
+        let mut s2 = s.clone();
+        s2.ink.pressure = PressureCurve::Firm;
+        s2.ink.mouse_draws = false;
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s2).unwrap()).unwrap();
+        assert_eq!(back.ink, s2.ink);
+    }
 
     #[test]
     fn notebooks_root_validation() {

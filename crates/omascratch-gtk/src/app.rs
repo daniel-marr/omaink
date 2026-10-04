@@ -33,6 +33,7 @@ pub fn run() -> glib::ExitCode {
 
 fn build_window(app: &adw::Application) {
     let canvas = CanvasView::default();
+    canvas.apply_ink_settings(omascratch_store::Settings::load_or_default(&omascratch_store::config_dir()).ink);
 
     let library = Library::open();
     library.ensure_notebook();
@@ -263,7 +264,9 @@ fn build_window(app: &adw::Application) {
             crate::settings::present_settings(
                 w.upcast_ref(),
                 root.clone(),
-                std::rc::Rc::new(move |_new_root| {
+                std::rc::Rc::new({
+                    let canvas = canvas.clone();
+                    move |_new_root| {
                     let Some(w) = win.upgrade() else { return };
                     if let Err(e) = storage.save_final(&canvas) {
                         let d = adw::AlertDialog::new(
@@ -276,6 +279,10 @@ fn build_window(app: &adw::Application) {
                     }
                     w.destroy();
                     build_window(&app);
+                }}),
+                std::rc::Rc::new({
+                    let canvas = canvas.clone();
+                    move |s: &omascratch_store::Settings| canvas.apply_ink_settings(s.ink)
                 }),
             );
         });

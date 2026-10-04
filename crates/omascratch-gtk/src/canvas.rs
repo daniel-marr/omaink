@@ -224,6 +224,10 @@ pub struct State {
     shape_drag: Option<(kurbo::Point, kurbo::Point)>,
     /// Shift held: constrain shapes (square/circle, 45-degree lines).
     shift_down: bool,
+    /// Pen & ink settings (Settings window), applied live.
+    ink: omascratch_store::InkSettings,
+    /// Mouse/touch drag panning instead of drawing (mouse_draws off).
+    mouse_pan_anchor: Option<kurbo::Vec2>,
     /// Hand-tool drag: (start widget x, start widget y, offset at start).
     panning: Option<(f64, f64, kurbo::Vec2)>,
     /// App-internal stroke clipboard (copy/cut/paste of selections).
@@ -288,6 +292,8 @@ impl Default for State {
             shape_kind: omascratch_ink::ShapeKind::Line,
             shape_drag: None,
             shift_down: false,
+            ink: omascratch_store::InkSettings::default(),
+            mouse_pan_anchor: None,
             panning: None,
             clipboard: Vec::new(),
             perf_frames: Vec::new(),
@@ -1871,6 +1877,11 @@ impl CanvasView {
             }
             view.imp().state.borrow_mut().shift_down =
                 g.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
+            if view.mouse_pans_instead() {
+                let mut st = view.imp().state.borrow_mut();
+                st.mouse_pan_anchor = Some(st.offset);
+                return;
+            }
             view.mouse_begin(x, y);
         });
         let weak = self.downgrade();
@@ -1881,6 +1892,17 @@ impl CanvasView {
             }
             view.imp().state.borrow_mut().shift_down =
                 g.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
+            {
+                let mut st = view.imp().state.borrow_mut();
+                if let Some(anchor) = st.mouse_pan_anchor {
+                    let zoom = st.zoom;
+                    st.offset = anchor - kurbo::Vec2::new(dx, dy) / zoom;
+                    Self::clamp_offset(&mut st);
+                    drop(st);
+                    view.queue_draw();
+                    return;
+                }
+            }
             if let Some((sx, sy)) = g.start_point() {
                 view.mouse_point(sx + dx, sy + dy);
             }
@@ -1889,6 +1911,9 @@ impl CanvasView {
         draw.connect_drag_end(move |g, _, _| {
             let Some(view) = weak.upgrade() else { return };
             if g.current_event().and_then(|ev| ev.device_tool()).is_some() {
+                return;
+            }
+            if view.imp().state.borrow_mut().mouse_pan_anchor.take().is_some() {
                 return;
             }
             view.commit_live();
@@ -1937,8 +1962,12 @@ impl CanvasView {
             click.connect_pressed(move |g, _, x, y| {
                 let Some(view) = weak.upgrade() else { return };
                 if g.current_event().and_then(|ev| ev.device_tool()).is_some() {
+                    // Claimed either way so a barrel click never pans or
+                    // opens a context menu.
                     g.set_state(gtk::EventSequenceState::Claimed);
-                    view.fire_eraser_toggle();
+                    if view.imp().state.borrow().ink.side_button == omascratch_store::SideButton::Eraser {
+                        view.fire_eraser_toggle();
+                    }
                     return;
                 }
                 // Mouse right-click on an image: its context menu.
@@ -2098,10 +2127,9 @@ impl CanvasView {
         let state = g.current_event_state();
         // XP-Pen barrel buttons arrive as middle/secondary button masks (or an
         // eraser-type tool). Holding one at pen-down erases for that stroke.
-        let barrel = state.intersects(
-            gdk::ModifierType::BUTTON2_MASK | gdk::ModifierType::BUTTON3_MASK,
-        );
         let mut st = self.imp().state.borrow_mut();
+        let barrel = st.ink.side_button == omascratch_store::SideButton::Eraser
+            && state.intersects(gdk::ModifierType::BUTTON2_MASK | gdk::ModifierType::BUTTON3_MASK);
         st.shift_down = state.contains(gdk::ModifierType::SHIFT_MASK);
         let mut force_erase = barrel;
         if let Some(t) = g.device_tool() {
@@ -2469,6 +2497,10 @@ impl CanvasView {
         // A zero pressure sample on a device that reports pressure is a
         // proximity artifact; clamp into a drawable range instead of a gap.
         let p = if pressure <= 0.0 { 0.05 } else { pressure.min(1.0) };
+        // Pressure response curve (stylus only; mouse pressure is synthetic).
+        // Real samples never drop to the 0.05 lift-off marker.
+        let stylus = !st.live.as_ref().is_some_and(|l| l.simulate_pressure);
+        let p = if stylus && pressure > 0.0 { p.powf(st.ink.pressure.gamma()).max(0.06) } else { p };
         st.debug.last_pressure = pressure;
         st.debug.min_pressure = st.debug.min_pressure.min(pressure);
         st.debug.max_pressure = st.debug.max_pressure.max(pressure);
@@ -2484,6 +2516,34 @@ impl CanvasView {
                 dt_ms: dt,
             });
         }
+    }
+
+    /// Mouse/touch drawing is off and the active tool would put ink down:
+    /// the drag pans the page instead.
+    fn mouse_pans_instead(&self) -> bool {
+        let st = self.imp().state.borrow();
+        !st.ink.mouse_draws
+            && matches!(
+                st.active,
+                ActiveTool::Pen | ActiveTool::Pencil | ActiveTool::Highlighter | ActiveTool::Eraser | ActiveTool::Shape
+            )
+    }
+
+    /// Apply Pen & ink settings. Smoothing changes re-render every stroke.
+    pub fn apply_ink_settings(&self, ink: omascratch_store::InkSettings) {
+        let mut st = self.imp().state.borrow_mut();
+        let resmooth = st.ink.smoothing != ink.smoothing;
+        st.ink = ink;
+        omascratch_ink::set_smoothing_passes(match ink.smoothing {
+            omascratch_store::Smoothing::Light => 0,
+            omascratch_store::Smoothing::Normal => 1,
+            omascratch_store::Smoothing::Strong => 3,
+        });
+        if resmooth {
+            st.node_cache.clear();
+        }
+        drop(st);
+        self.queue_draw();
     }
 
     fn mouse_begin(&self, x: f64, y: f64) {

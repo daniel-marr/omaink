@@ -12,7 +12,7 @@ use gtk4::{gio, glib, prelude::*};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use omascratch_store::{self as store, Settings};
+use omascratch_store::{self as store, PressureCurve, Settings, SideButton, Smoothing};
 
 /// Show a message dialog over `parent`.
 fn alert(parent: &impl IsA<gtk::Widget>, heading: &str, body: &str) {
@@ -35,9 +35,49 @@ fn save_root(root: &Path) -> Result<(), String> {
     settings.save(&store::config_dir()).map_err(|e| e.to_string())
 }
 
+/// Load settings, apply `edit`, save, and hand the result to `on_changed`.
+fn update(on_changed: &Rc<dyn Fn(&Settings)>, edit: impl FnOnce(&mut Settings)) {
+    let mut settings = Settings::load_or_default(&store::config_dir());
+    edit(&mut settings);
+    if let Err(e) = settings.save(&store::config_dir()) {
+        eprintln!("omascratch: could not save settings: {e}");
+    }
+    on_changed(&settings);
+}
+
+/// A dropdown row over `options` (label, value); `pick` reads the current
+/// value, `set` stores a new one.
+fn choice_row<T: Copy + PartialEq + 'static>(
+    title: &str,
+    subtitle: &str,
+    options: &'static [(&'static str, T)],
+    current: T,
+    on_pick: impl Fn(T) + 'static,
+) -> adw::ComboRow {
+    let row = adw::ComboRow::new();
+    row.set_title(title);
+    row.set_subtitle(subtitle);
+    let labels: Vec<&str> = options.iter().map(|(l, _)| *l).collect();
+    row.set_model(Some(&gtk::StringList::new(&labels)));
+    row.set_selected(options.iter().position(|(_, v)| *v == current).unwrap_or(0) as u32);
+    row.connect_selected_notify(move |r| {
+        if let Some((_, v)) = options.get(r.selected() as usize) {
+            on_pick(*v);
+        }
+    });
+    row
+}
+
 /// Open the Settings window. `on_root_changed` runs after the user has
-/// confirmed and saved a new notebooks folder.
-pub fn present_settings(parent: &gtk::Widget, current_root: PathBuf, on_root_changed: Rc<dyn Fn(PathBuf)>) {
+/// confirmed and saved a new notebooks folder; `on_changed` after any other
+/// setting is saved (apply it live).
+pub fn present_settings(
+    parent: &gtk::Widget,
+    current_root: PathBuf,
+    on_root_changed: Rc<dyn Fn(PathBuf)>,
+    on_changed: Rc<dyn Fn(&Settings)>,
+) {
+    let current = Settings::load_or_default(&store::config_dir());
     let dialog = adw::PreferencesDialog::new();
     dialog.set_title("Settings");
     dialog.set_search_enabled(false);
@@ -124,6 +164,53 @@ pub fn present_settings(parent: &gtk::Widget, current_root: PathBuf, on_root_cha
     row.add_suffix(&change_btn);
     storage.add(&row);
     page.add(&storage);
+
+    // -- Pen & ink --
+    let ink = adw::PreferencesGroup::new();
+    ink.set_title("Pen &amp; ink");
+    {
+        let cb = on_changed.clone();
+        ink.add(&choice_row(
+            "Pressure response",
+            "How hard you press for a thick line (new strokes)",
+            &[("Soft", PressureCurve::Soft), ("Normal", PressureCurve::Normal), ("Firm", PressureCurve::Firm)],
+            current.ink.pressure,
+            move |v| update(&cb, |s| s.ink.pressure = v),
+        ));
+    }
+    {
+        let cb = on_changed.clone();
+        ink.add(&choice_row(
+            "Smoothing",
+            "Evens out shaky lines (all strokes)",
+            &[("Light", Smoothing::Light), ("Normal", Smoothing::Normal), ("Strong", Smoothing::Strong)],
+            current.ink.smoothing,
+            move |v| update(&cb, |s| s.ink.smoothing = v),
+        ));
+    }
+    {
+        let cb = on_changed.clone();
+        ink.add(&choice_row(
+            "Pen side button",
+            "Eraser: click to switch to the eraser, hold while drawing to erase",
+            &[("Eraser", SideButton::Eraser), ("Off", SideButton::Off)],
+            current.ink.side_button,
+            move |v| update(&cb, |s| s.ink.side_button = v),
+        ));
+    }
+    {
+        let row = adw::SwitchRow::new();
+        row.set_title("Draw with mouse and touch");
+        row.set_subtitle("When off, only the pen draws; mouse and finger drags pan the page");
+        row.set_active(current.ink.mouse_draws);
+        let cb = on_changed.clone();
+        row.connect_active_notify(move |r| {
+            let on = r.is_active();
+            update(&cb, |s| s.ink.mouse_draws = on);
+        });
+        ink.add(&row);
+    }
+    page.add(&ink);
 
     dialog.add(&page);
     dialog.present(Some(parent));

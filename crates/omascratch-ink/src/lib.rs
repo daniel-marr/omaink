@@ -10,4 +10,4 @@ pub mod shapes;
 
 pub use hit::{distance_to_stroke, erase_samples, point_in_polygon, stroke_hit, stroke_inside_polygon, stroke_inside_rect, stroke_touched};
 pub use shapes::{shape_polylines, ShapeKind};
-pub use outline::{outline_points, outline_to_bezpath, stroke_bezpath, stroke_path};
+pub use outline::{outline_points, outline_to_bezpath, set_smoothing_passes, stroke_bezpath, stroke_path};

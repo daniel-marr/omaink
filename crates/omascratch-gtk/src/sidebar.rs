@@ -34,6 +34,9 @@ pub struct Sidebar {
 struct Inner {
     library: Rc<Library>,
     list: gtk::ListBox,
+    search: gtk::SearchEntry,
+    /// Lower-cased title filter; empty = normal tree.
+    query: RefCell<String>,
     notebook_label: gtk::Label,
     selected: RefCell<Option<PathBuf>>,
     row_refs: RefCell<Vec<RowRef>>,
@@ -71,6 +74,15 @@ impl Sidebar {
         header.append(&new_note_btn);
         header.append(&new_folder_btn);
         widget.append(&header);
+
+        // Title search, where the tree starts.
+        let search = gtk::SearchEntry::new();
+        search.set_placeholder_text(Some("Search notes"));
+        search.add_css_class("sidebar-search");
+        search.set_margin_start(10);
+        search.set_margin_end(10);
+        search.set_margin_bottom(4);
+        widget.append(&search);
 
         // Tree.
         let list = gtk::ListBox::new();
@@ -124,6 +136,8 @@ impl Sidebar {
         let inner = Rc::new(Inner {
             library: library.clone(),
             list: list.clone(),
+            search: search.clone(),
+            query: RefCell::new(String::new()),
             notebook_label,
             selected: RefCell::new(None),
             row_refs: RefCell::new(Vec::new()),
@@ -195,6 +209,20 @@ impl Sidebar {
         sidebar.build_switcher_popover(&switcher);
         sidebar.build_help_popover(&help_btn);
         sidebar.build_settings_popover(&gear_btn);
+        {
+            let sb = sidebar.clone();
+            search.connect_search_changed(move |e| {
+                *sb.inner.query.borrow_mut() = e.text().trim().to_lowercase();
+                sb.refresh();
+            });
+            // Esc clears the search and returns to the full tree.
+            let sb = sidebar.clone();
+            search.connect_stop_search(move |e| {
+                e.set_text("");
+                *sb.inner.query.borrow_mut() = String::new();
+                sb.refresh();
+            });
+        }
         sidebar.refresh();
         sidebar
     }
@@ -245,6 +273,40 @@ impl Sidebar {
     /// Rebuild on the next idle tick. Use this when the trigger is a signal of
     /// a row widget that `refresh` would destroy (e.g. the rename entry's own
     /// activate/focus-leave), to avoid freeing a widget mid-emission.
+    /// Ctrl+F: focus the title search.
+    pub fn focus_search(&self) {
+        self.inner.search.grab_focus();
+    }
+
+    /// Rows to show for a title search: matching notes plus their ancestor
+    /// folders, with every folder expanded.
+    fn search_rows(&self, query: &str) -> Vec<Row> {
+        let mut out = Vec::new();
+        // Folders seen above the current row, by depth; emitted on demand.
+        let mut ancestors: Vec<(Row, bool)> = Vec::new();
+        for row in self.inner.library.rows() {
+            match &row {
+                Row::Folder { depth, .. } => {
+                    ancestors.truncate(*depth as usize);
+                    ancestors.push((row.clone(), false));
+                }
+                Row::Note { title, depth, .. } => {
+                    ancestors.truncate(*depth as usize);
+                    if title.to_lowercase().contains(query) {
+                        for (folder, shown) in ancestors.iter_mut() {
+                            if !*shown {
+                                out.push(folder.clone());
+                                *shown = true;
+                            }
+                        }
+                        out.push(row.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     fn refresh_idle(&self) {
         let sb = self.clone();
         glib::idle_add_local_once(move || sb.refresh());
@@ -264,7 +326,23 @@ impl Sidebar {
         let mut hide_below: Option<u32> = None;
         let mut visible_idx = 0usize;
 
-        for row in self.inner.library.rows() {
+        let query = self.inner.query.borrow().clone();
+        let searching = !query.is_empty();
+        let rows = if searching { self.search_rows(&query) } else { self.inner.library.rows() };
+        if searching && rows.is_empty() {
+            let empty = gtk::Label::new(Some("No matching notes"));
+            empty.add_css_class("dim-label");
+            empty.set_xalign(0.0);
+            empty.set_margin_start(8);
+            empty.set_margin_top(6);
+            let row = gtk::ListBoxRow::new();
+            row.set_child(Some(&empty));
+            row.set_activatable(false);
+            row.set_selectable(false);
+            list.append(&row);
+        }
+
+        for row in rows {
             let depth = match &row {
                 Row::Folder { depth, .. } => *depth,
                 Row::Note { depth, .. } => *depth,
@@ -277,7 +355,8 @@ impl Sidebar {
                 hide_below = None;
             }
 
-            let is_collapsed_folder = matches!(&row, Row::Folder { id, .. } if collapsed.contains(id));
+            let is_collapsed_folder =
+                !searching && matches!(&row, Row::Folder { id, .. } if collapsed.contains(id));
             if is_collapsed_folder {
                 hide_below = Some(depth);
             }
@@ -683,6 +762,7 @@ impl Sidebar {
             ("Ctrl+Z / Ctrl+Shift+Z", "Undo / Redo"),
             ("F9", "Toggle sidebar"),
             ("F11", "Fullscreen canvas"),
+            ("Ctrl+F", "Search note titles (Esc clears)"),
             ("Ctrl+= / Ctrl+−", "Zoom in / out"),
             ("Ctrl+0", "Reset view (100%, top-left)"),
             ("Home", "Go to the top-left of the page"),

@@ -185,6 +185,18 @@ window {{
     font-size: 0.85rem;
     color: {dark_fg};
 }}
+.sidebar-search {{
+    min-height: 26px;
+    font-size: 0.9rem;
+    background-color: alpha({fg}, 0.06);
+    border: 1px solid alpha({muted}, 0.5);
+    border-radius: 4px;
+    box-shadow: none;
+}}
+.sidebar-search:focus-within {{
+    border-color: {accent};
+    outline: none;
+}}
 .navigation-sidebar {{
     background-color: {dark_bg};
     padding: 4px 8px;

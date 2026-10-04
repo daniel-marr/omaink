@@ -216,6 +216,22 @@ fn build_window(app: &adw::Application) {
     }
 
     install_shortcuts(&window, &canvas, &split, toggle_fullscreen);
+    // Ctrl+F → sidebar title search (reveals the sidebar if hidden).
+    {
+        let find = gtk::EventControllerKey::new();
+        find.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let sb = sidebar.clone();
+        let split = split.clone();
+        find.connect_key_pressed(move |_, key, _, m| {
+            if matches!(key, gdk::Key::f | gdk::Key::F) && m.contains(gdk::ModifierType::CONTROL_MASK) {
+                split.set_show_sidebar(true);
+                sb.focus_search();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(find);
+    }
     install_close_handler(&window, &storage, &canvas);
     // Keep the theme manager (CSS provider + file watcher) alive with the window.
     window.connect_map(move |_| {

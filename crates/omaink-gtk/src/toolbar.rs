@@ -557,6 +557,26 @@ fn lucide_glyph(draw: impl Fn(&gtk::cairo::Context) + 'static) -> gtk::DrawingAr
     area
 }
 
+/// Insert space: a line with arrows pushing apart above and below it.
+fn space_glyph() -> gtk::DrawingArea {
+    lucide_glyph(|cr| {
+        cr.move_to(3.0, 12.0);
+        cr.line_to(21.0, 12.0);
+        // Up arrow.
+        cr.move_to(12.0, 9.0);
+        cr.line_to(12.0, 2.5);
+        cr.move_to(8.5, 6.0);
+        cr.line_to(12.0, 2.5);
+        cr.line_to(15.5, 6.0);
+        // Down arrow.
+        cr.move_to(12.0, 15.0);
+        cr.line_to(12.0, 21.5);
+        cr.move_to(8.5, 18.0);
+        cr.line_to(12.0, 21.5);
+        cr.line_to(15.5, 18.0);
+    })
+}
+
 /// Copy: two overlapping sheets (Lucide `copy`).
 fn copy_glyph() -> gtk::DrawingArea {
     lucide_glyph(|cr| {
@@ -622,6 +642,7 @@ enum Mode {
     Shape(ShapeKind),
     Pan,
     Text,
+    InsertSpace,
 }
 
 struct Inner {
@@ -646,6 +667,7 @@ struct Inner {
     gallery: gtk::Box,
     select_btn: gtk::Button,
     lasso_btn: gtk::Button,
+    space_btn: gtk::Button,
     pan_btn: gtk::Button,
     shapes_btn: gtk::MenuButton,
     text_btn: gtk::Button,
@@ -674,6 +696,10 @@ impl Toolbar {
         select_btn.add_css_class("flat");
         select_btn.set_child(Some(&select_glyph()));
         select_btn.set_tooltip_text(Some("Select"));
+        let space_btn = gtk::Button::new();
+        space_btn.add_css_class("flat");
+        space_btn.set_child(Some(&space_glyph()));
+        space_btn.set_tooltip_text(Some("Insert space — drag down from a line to push everything below it down; drag up to close a gap"));
         let lasso_btn = gtk::Button::new();
         lasso_btn.add_css_class("flat");
         lasso_btn.set_child(Some(&lasso_glyph()));
@@ -710,6 +736,7 @@ impl Toolbar {
             gallery: gtk::Box::new(gtk::Orientation::Horizontal, 1),
             select_btn: select_btn.clone(),
             lasso_btn: lasso_btn.clone(),
+            space_btn: space_btn.clone(),
             pan_btn: pan_btn.clone(),
             shapes_btn: shapes_btn.clone(),
             text_btn: text_btn.clone(),
@@ -744,9 +771,14 @@ impl Toolbar {
             let t = tb.clone();
             pan_btn.connect_clicked(move |_| t.set_mode(Mode::Pan));
         }
+        {
+            let t = tb.clone();
+            space_btn.connect_clicked(move |_| t.set_mode(Mode::InsertSpace));
+        }
         tb.widget.append(&select_btn);
         tb.widget.append(&pan_btn);
         tb.widget.append(&lasso_btn);
+        tb.widget.append(&space_btn);
         let copy_btn = gtk::Button::new();
         copy_btn.set_child(Some(&copy_glyph()));
         copy_btn.add_css_class("flat");
@@ -1158,6 +1190,9 @@ impl Toolbar {
             Mode::Text => {
                 self.inner.canvas.set_active_tool(ActiveTool::Text);
             }
+            Mode::InsertSpace => {
+                self.inner.canvas.set_active_tool(ActiveTool::InsertSpace);
+            }
             Mode::Shape(kind) => {
                 self.inner.last_shape.set(kind);
                 self.inner.canvas.set_shape_tool(kind);
@@ -1183,6 +1218,7 @@ impl Toolbar {
         let mode = self.inner.mode.get();
         set_active_css(&self.inner.select_btn, mode == Mode::Select);
         set_active_css(&self.inner.lasso_btn, mode == Mode::Lasso);
+        set_active_css(&self.inner.space_btn, mode == Mode::InsertSpace);
         set_active_css(&self.inner.pan_btn, mode == Mode::Pan);
         set_active_css(&self.inner.text_btn, mode == Mode::Text);
         if matches!(mode, Mode::Shape(_)) {

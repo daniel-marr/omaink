@@ -84,6 +84,9 @@ pub enum ActiveTool {
     Pan,
     /// Text tool: click to create or edit a text box.
     Text,
+    /// Insert space: drag down from a line to push everything below it
+    /// down (or up to close a gap).
+    InsertSpace,
 }
 
 impl ActiveTool {
@@ -228,6 +231,12 @@ pub struct State {
     ink: omaink_store::InkSettings,
     /// Mouse/touch drag panning instead of drawing (mouse_draws off).
     mouse_pan_anchor: Option<kurbo::Vec2>,
+    /// Widget size in px (for page-extent scroll limits).
+    view_px: (f64, f64),
+    /// Insert-space drag: (line y, current pointer y) in world units.
+    space_drag: Option<(f64, f64)>,
+    /// Edge auto-scroll tick is running.
+    edge_tick: bool,
     /// Hand-tool drag: (start widget x, start widget y, offset at start).
     panning: Option<(f64, f64, kurbo::Vec2)>,
     /// App-internal stroke clipboard (copy/cut/paste of selections).
@@ -294,6 +303,9 @@ impl Default for State {
             shift_down: false,
             ink: omaink_store::InkSettings::default(),
             mouse_pan_anchor: None,
+            view_px: (0.0, 0.0),
+            space_drag: None,
+            edge_tick: false,
             panning: None,
             clipboard: Vec::new(),
             perf_frames: Vec::new(),
@@ -434,6 +446,40 @@ fn now_unix_ms() -> u64 {
 
 /// Resolve a semantic color to an on-screen RGBA. Highlighter strokes render
 /// translucent. (M5's theme adapter will replace the fixed Foreground/Accent.)
+/// Largest scroll offsets (world units) for a growing page: the content's
+/// bottom can rise to 75% of the view (a quarter screen of blank page
+/// below it), and sideways scrolling only opens once content passes the
+/// right edge (plus a small pad).
+fn page_scroll_limits(content: Option<kurbo::Rect>, view: kurbo::Size) -> (f64, f64) {
+    const SPACE_BELOW: f64 = 0.25;
+    const PAD_RIGHT: f64 = 40.0;
+    let (right, bottom) = content.map_or((0.0, 0.0), |r| (r.x1, r.y1));
+    (
+        (right + PAD_RIGHT - view.width).max(0.0),
+        (bottom - view.height * (1.0 - SPACE_BELOW)).max(0.0),
+    )
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    #[test]
+    fn page_grows_with_content_and_locks_sideways() {
+        let view = kurbo::Size::new(1000.0, 800.0);
+        assert_eq!(page_scroll_limits(None, view), (0.0, 0.0), "empty page: no scrolling");
+        // Content in the top half of a screen-wide page: nowhere to scroll.
+        let small = kurbo::Rect::new(100.0, 100.0, 800.0, 400.0);
+        assert_eq!(page_scroll_limits(Some(small), view), (0.0, 0.0));
+        // Tall content: scroll until its bottom sits 75% down the view.
+        let tall = kurbo::Rect::new(100.0, 100.0, 800.0, 3000.0);
+        assert_eq!(page_scroll_limits(Some(tall), view), (0.0, 3000.0 - 600.0));
+        // Content past the right edge opens sideways scrolling just enough.
+        let wide = kurbo::Rect::new(100.0, 100.0, 1500.0, 400.0);
+        assert_eq!(page_scroll_limits(Some(wide), view).0, 1500.0 + 40.0 - 1000.0);
+    }
+}
+
 fn resolve_color_inv(c: SemanticColor, tool: Tool, inverted: bool, pal: &CanvasPalette) -> gdk::RGBA {
     let page = if inverted { pal.bg_inv } else { pal.bg };
     let page_dark = luminance(page.red(), page.green(), page.blue()) < 0.5;
@@ -1240,9 +1286,10 @@ impl CanvasView {
             return;
         }
         let (w, h) = (self.width() as f64 / 2.0, self.height() as f64 / 2.0);
+        let prev = st.offset;
         st.offset += kurbo::Vec2::new(w / old, h / old) - kurbo::Vec2::new(w / new, h / new);
         st.zoom = new;
-        Self::clamp_offset(&mut st);
+        Self::clamp_offset(&mut st, prev);
         drop(st);
         self.queue_draw();
         self.notify_zoom();
@@ -1258,9 +1305,10 @@ impl CanvasView {
         let (w, h) = (self.width() as f64 / 2.0, self.height() as f64 / 2.0);
         let before = kurbo::Vec2::new(w / old, h / old);
         let after = kurbo::Vec2::new(w, h);
+        let prev = st.offset;
         st.offset += before - after;
         st.zoom = 1.0;
-        Self::clamp_offset(&mut st);
+        Self::clamp_offset(&mut st, prev);
         drop(st);
         self.queue_draw();
         self.notify_zoom();
@@ -1273,6 +1321,7 @@ impl CanvasView {
             self.commit_text_edit();
         }
         self.imp().state.borrow_mut().active = tool;
+        self.set_cursor_from_name(if tool == ActiveTool::InsertSpace { Some("row-resize") } else { None });
     }
 
     pub fn active_tool(&self) -> ActiveTool {
@@ -1896,8 +1945,9 @@ impl CanvasView {
                 let mut st = view.imp().state.borrow_mut();
                 if let Some(anchor) = st.mouse_pan_anchor {
                     let zoom = st.zoom;
+                    let prev = st.offset;
                     st.offset = anchor - kurbo::Vec2::new(dx, dy) / zoom;
-                    Self::clamp_offset(&mut st);
+                    Self::clamp_offset(&mut st, prev);
                     drop(st);
                     view.queue_draw();
                     return;
@@ -1943,8 +1993,9 @@ impl CanvasView {
             let mut st = view.imp().state.borrow_mut();
             if let Some(anchor) = st.pan_anchor {
                 let zoom = st.zoom;
+                let prev = st.offset;
                 st.offset = anchor - kurbo::Vec2::new(dx, dy) / zoom;
-                Self::clamp_offset(&mut st);
+                Self::clamp_offset(&mut st, prev);
                 drop(st);
                 view.queue_draw();
             }
@@ -2062,8 +2113,9 @@ impl CanvasView {
             } else {
                 let mut st = view.imp().state.borrow_mut();
                 let step = 40.0 / st.zoom;
+                let prev = st.offset;
                 st.offset += kurbo::Vec2::new(dx * step, dy * step);
-                Self::clamp_offset(&mut st);
+                Self::clamp_offset(&mut st, prev);
                 drop(st);
                 view.queue_draw();
             }
@@ -2085,13 +2137,141 @@ impl CanvasView {
     /// The canvas is pinned at a top-left home: the viewport never scrolls
     /// above or left of the page origin, so the margin and rule lines always
     /// have a fixed home regardless of pan/zoom.
-    fn clamp_offset(st: &mut State) {
-        if st.offset.x < 0.0 {
-            st.offset.x = 0.0;
+    /// Everything on the page, including a selection or insert-space drag
+    /// in progress (so the page grows while you carry things past an edge).
+    fn content_rect(st: &mut State) -> Option<kurbo::Rect> {
+        Self::ensure_bounds(st);
+        let mut out: Option<kurbo::Rect> = None;
+        fn add(out: &mut Option<kurbo::Rect>, r: kurbo::Rect) {
+            *out = Some(out.map_or(r, |o| o.union(r)));
         }
-        if st.offset.y < 0.0 {
-            st.offset.y = 0.0;
+        for b in st.bounds.iter().flatten() {
+            add(&mut out, *b);
         }
+        for i in &st.session.content.images {
+            add(&mut out, i.rect());
+        }
+        for t in &st.session.content.texts {
+            add(&mut out, t.rect());
+        }
+        if st.sel_drag.is_some() {
+            if let Some(b) = Self::selection_bounds(st) {
+                add(&mut out, b + st.sel_offset);
+            }
+        }
+        if let (Some((_, dy)), Some(o)) = (Self::space_shift(st), out) {
+            if dy > 0.0 {
+                add(&mut out, kurbo::Rect::new(o.x0, o.y1, o.x1, o.y1 + dy));
+            }
+        }
+        out
+    }
+
+    /// Scroll limits for a growing page (OneNote model): nothing above or
+    /// left of the origin; down to the content plus a quarter screen of
+    /// blank page; sideways only once content passes the right edge.
+    /// `prev` is the offset before this change: a page that shrank (content
+    /// deleted) never pulls the view back, it only stops further travel.
+    fn clamp_offset(st: &mut State, prev: kurbo::Vec2) {
+        let view = kurbo::Size::new(st.view_px.0 / st.zoom, st.view_px.1 / st.zoom);
+        let (max_x, max_y) = page_scroll_limits(Self::content_rect(st), view);
+        st.offset.x = st.offset.x.clamp(0.0, max_x.max(prev.x));
+        st.offset.y = st.offset.y.clamp(0.0, max_y.max(prev.y));
+    }
+
+    /// Live insert-space shift: (line y, dy), with a closing gap limited so
+    /// content below the line never moves above it.
+    fn space_shift(st: &State) -> Option<(f64, f64)> {
+        let (line, cur) = st.space_drag?;
+        let mut dy = cur - line;
+        if dy < 0.0 {
+            let tops = st
+                .bounds
+                .iter()
+                .flatten()
+                .map(|b| b.y0)
+                .chain(st.session.content.images.iter().map(|i| i.y))
+                .chain(st.session.content.texts.iter().map(|t| t.y))
+                .filter(|y| *y >= line);
+            let min_top = tops.fold(f64::INFINITY, f64::min);
+            if min_top.is_finite() {
+                dy = dy.max(line - min_top);
+            } else {
+                dy = 0.0;
+            }
+        }
+        Some((line, dy))
+    }
+
+    /// Vertical shift the live insert-space drag applies to an object whose
+    /// top edge is at `top`.
+    fn space_dy_for(st: &State, top: f64) -> f64 {
+        match Self::space_shift(st) {
+            Some((line, dy)) if top >= line => dy,
+            _ => 0.0,
+        }
+    }
+
+    /// While a selection or insert-space drag is held near the window edge,
+    /// scroll the page (and carry the dragged content along).
+    fn start_edge_scroll(&self) {
+        {
+            let mut st = self.imp().state.borrow_mut();
+            if st.edge_tick {
+                return;
+            }
+            st.edge_tick = true;
+        }
+        self.add_tick_callback(|w, _| {
+            let mut st = w.imp().state.borrow_mut();
+            if st.sel_drag.is_none() && st.sel_resize.is_none() && st.space_drag.is_none() {
+                st.edge_tick = false;
+                return glib::ControlFlow::Break;
+            }
+            const EDGE: f64 = 36.0;
+            const SPEED: f64 = 16.0;
+            let speed = |p: f64, len: f64| {
+                if p < EDGE {
+                    -SPEED * (EDGE - p.max(0.0)) / EDGE
+                } else if p > len - EDGE {
+                    SPEED * (p.min(len) - (len - EDGE)) / EDGE
+                } else {
+                    0.0
+                }
+            };
+            let (px, py) = st.pointer;
+            let (vw, vh) = st.view_px;
+            let v = kurbo::Vec2::new(speed(px, vw), speed(py, vh));
+            if v.hypot() < 0.01 {
+                return glib::ControlFlow::Continue;
+            }
+            let prev = st.offset;
+            let zoom = st.zoom;
+            st.offset += v / zoom;
+            Self::clamp_offset(&mut st, prev);
+            let moved = st.offset - prev;
+            if moved.hypot() < 1e-9 {
+                return glib::ControlFlow::Continue;
+            }
+            // The pointer stays put on screen, so the world under it moved.
+            if let Some(last) = st.sel_drag {
+                st.sel_offset += moved;
+                st.sel_drag = Some(last + moved);
+            }
+            if let Some(mut r) = st.sel_resize {
+                let (wx, wy) = Self::widget_to_world(&st, px, py);
+                let d0 = r.start - r.anchor;
+                let len2 = d0.hypot2().max(1e-9);
+                r.factor = ((kurbo::Point::new(wx, wy) - r.anchor).dot(d0) / len2).max(0.05);
+                st.sel_resize = Some(r);
+            }
+            if let Some((line, cur)) = st.space_drag {
+                st.space_drag = Some((line, cur + moved.y));
+            }
+            drop(st);
+            w.queue_draw();
+            glib::ControlFlow::Continue
+        });
     }
 
     fn zoom_by(&self, factor: f64) {
@@ -2105,9 +2285,10 @@ impl CanvasView {
         let (px, py) = st.pointer;
         let before = kurbo::Vec2::new(px / old, py / old);
         let after = kurbo::Vec2::new(px / new, py / new);
+        let prev = st.offset;
         st.offset += before - after;
         st.zoom = new;
-        Self::clamp_offset(&mut st);
+        Self::clamp_offset(&mut st, prev);
         drop(st);
         self.queue_draw();
         self.notify_zoom();
@@ -2153,7 +2334,11 @@ impl CanvasView {
             st.live_erased.clear();
             st.erase_path.clear();
         }
+        let edge = st.sel_drag.is_some() || st.sel_resize.is_some() || st.space_drag.is_some();
         drop(st);
+        if edge {
+            self.start_edge_scroll();
+        }
         self.push_stylus_point(g, x, y);
     }
 
@@ -2275,6 +2460,10 @@ impl CanvasView {
             }
             // Text clicks are handled before gestures start (text_press).
             ActiveTool::Text => {}
+            ActiveTool::InsertSpace => {
+                Self::ensure_bounds(st);
+                st.space_drag = Some((wy, wy));
+            }
         }
     }
 
@@ -2458,8 +2647,13 @@ impl CanvasView {
         st.pointer = (x, y);
         st.debug.sample_times.push_back(Instant::now());
         if let Some((sx, sy, start_offset)) = st.panning {
+            let prev = st.offset;
             st.offset = start_offset - kurbo::Vec2::new(x - sx, y - sy) / st.zoom;
-            Self::clamp_offset(st);
+            Self::clamp_offset(st, prev);
+            return;
+        }
+        if let Some((line, _)) = st.space_drag {
+            st.space_drag = Some((line, wy));
             return;
         }
         if st.erasing {
@@ -2560,7 +2754,11 @@ impl CanvasView {
         st.debug.tool_name = "Mouse".into();
         Self::begin_locked(&mut st, x, y, true);
         Self::push_point_locked(&mut st, x, y, 0.5, 0.0, 0.0);
+        let edge = st.sel_drag.is_some() || st.sel_resize.is_some() || st.space_drag.is_some();
         drop(st);
+        if edge {
+            self.start_edge_scroll();
+        }
         self.queue_draw();
     }
 
@@ -2573,6 +2771,74 @@ impl CanvasView {
 
     fn commit_live(&self) {
         let mut st = self.imp().state.borrow_mut();
+
+        if st.space_drag.is_some() {
+            let shift = Self::space_shift(&st);
+            st.space_drag = None;
+            if let Some((line, dy)) = shift.filter(|(_, dy)| dy.abs() >= 0.5) {
+                Self::ensure_bounds(&mut st);
+                let below: HashSet<StrokeId> = st
+                    .session
+                    .content
+                    .strokes
+                    .iter()
+                    .zip(st.bounds.iter())
+                    .filter(|(_, b)| b.is_some_and(|b| b.y0 >= line))
+                    .map(|(s, _)| s.id)
+                    .collect();
+                let (before_s, after_s): (Vec<Stroke>, Vec<Stroke>) = st
+                    .session
+                    .content
+                    .strokes
+                    .iter()
+                    .filter(|s| below.contains(&s.id))
+                    .map(|s| {
+                        let mut a = s.clone();
+                        for p in &mut a.points {
+                            p.y += dy;
+                        }
+                        (s.clone(), a)
+                    })
+                    .unzip();
+                let (before_i, after_i): (Vec<ImageItem>, Vec<ImageItem>) = st
+                    .session
+                    .content
+                    .images
+                    .iter()
+                    .filter(|i| i.y >= line)
+                    .map(|i| {
+                        let mut a = i.clone();
+                        a.y += dy;
+                        (i.clone(), a)
+                    })
+                    .unzip();
+                let (before_t, after_t): (Vec<TextBox>, Vec<TextBox>) = st
+                    .session
+                    .content
+                    .texts
+                    .iter()
+                    .filter(|t| t.y >= line)
+                    .map(|t| {
+                        let mut a = t.clone();
+                        a.y += dy;
+                        (t.clone(), a)
+                    })
+                    .unzip();
+                if !(before_s.is_empty() && before_i.is_empty() && before_t.is_empty()) {
+                    for s in &before_s {
+                        st.node_cache.remove(&s.id);
+                    }
+                    Self::dispatch_combined(&mut st, before_s, after_s, before_i, after_i, before_t, after_t);
+                    drop(st);
+                    self.queue_draw();
+                    self.notify_changed();
+                    return;
+                }
+            }
+            drop(st);
+            self.queue_draw();
+            return;
+        }
 
         if st.panning.take().is_some() {
             drop(st);
@@ -2918,6 +3184,7 @@ impl CanvasView {
         snapshot.scale(st.zoom as f32, st.zoom as f32);
         snapshot.translate(&graphene::Point::new(-st.offset.x as f32, -st.offset.y as f32));
 
+        st.view_px = (self.width() as f64, self.height() as f64);
         let visible = kurbo::Rect::new(
             st.offset.x,
             st.offset.y,
@@ -2973,6 +3240,7 @@ impl CanvasView {
         };
         for img in &images {
             let mut r = img.rect();
+            r = r + kurbo::Vec2::new(0.0, Self::space_dy_for(&st, r.y0));
             if st.sel_images.contains(&img.id) {
                 if st.sel_drag.is_some() {
                     r = r + st.sel_offset;
@@ -3011,6 +3279,10 @@ impl CanvasView {
             let color = resolve_color_inv(tb.color, Tool::Pen, st.inverted, &st.palette);
             let selected = st.sel_texts.contains(&tb.id);
             snapshot.save();
+            let sdy = Self::space_dy_for(&st, tb.y);
+            if sdy != 0.0 {
+                snapshot.translate(&graphene::Point::new(0.0, sdy as f32));
+            }
             if selected && st.sel_drag.is_some() {
                 snapshot.translate(&graphene::Point::new(st.sel_offset.x as f32, st.sel_offset.y as f32));
             } else if let (true, Some(rz)) = (selected, st.sel_resize) {
@@ -3050,7 +3322,8 @@ impl CanvasView {
             .collect();
         for (id, bounds) in strokes {
             let Some(bounds) = bounds else { continue };
-            if bounds.intersect(visible).is_zero_area() {
+            let sdy = Self::space_dy_for(&st, bounds.y0);
+            if (bounds + kurbo::Vec2::new(0.0, sdy)).intersect(visible).is_zero_area() {
                 continue;
             }
             // Strokes the current eraser drag affects: stroke eraser hides
@@ -3107,7 +3380,32 @@ impl CanvasView {
                 continue;
             }
             if let Some(node) = st.node_cache.get(&id) {
-                snapshot.append_node(node);
+                if sdy != 0.0 {
+                    snapshot.save();
+                    snapshot.translate(&graphene::Point::new(0.0, sdy as f32));
+                    snapshot.append_node(node);
+                    snapshot.restore();
+                } else {
+                    snapshot.append_node(node);
+                }
+            }
+        }
+
+        // Insert space: the line, and the gap being opened (or closed).
+        if let Some((line, dy)) = Self::space_shift(&st) {
+            let accent = st.palette.accent;
+            let band = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.12);
+            let (y0, y1) = if dy >= 0.0 { (line, line + dy) } else { (line + dy, line) };
+            snapshot.append_color(
+                &band,
+                &graphene::Rect::new(visible.x0 as f32, y0 as f32, visible.width() as f32, (y1 - y0) as f32),
+            );
+            let w = (1.5 / st.zoom) as f32;
+            for y in [line, line + dy] {
+                snapshot.append_color(
+                    &accent,
+                    &graphene::Rect::new(visible.x0 as f32, y as f32 - w / 2.0, visible.width() as f32, w),
+                );
             }
         }
 

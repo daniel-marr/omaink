@@ -5,21 +5,20 @@ on:
 
 # Builds and unit tests only. This job cannot and does not establish live
 # Omarchy/Hyprland desktop acceptance; that is recorded manually in
-# VERIFICATION.md on real hardware.
+# VERIFICATION.md on real hardware. Runs in an Arch Linux container because
+# OmaInk needs GTK 4.18+ and libadwaita 1.6+ (newer than Ubuntu runners).
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    container: archlinux:latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install GTK4 + libadwaita dev libraries
+      - name: Install toolchain and GTK4 + libadwaita
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev desktop-file-utils
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita desktop-file-utils xorg-server-xvfb
+      - uses: actions/checkout@v4
       - name: Build workspace
         run: cargo build --workspace --locked
-      - name: Unit tests (headless; core crates only prove logic, not desktop behavior)
-        run: cargo test --workspace --locked
+      - name: Unit tests (GTK tests under a virtual display)
+        run: xvfb-run -a cargo test --workspace --locked
       - name: Validate desktop entry
         run: desktop-file-validate packaging/co.think3.OmaInk.desktop

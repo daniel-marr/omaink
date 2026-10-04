@@ -1,16 +1,33 @@
 # Credits
 
-Community App badge: https://github.com/tcballard/omarchy-badges (MIT layout; Omarchy name/icon rights retained by their owners). Badge linked remotely; no other artwork included. Choose the application licence before distribution.
+**OmaInk** is created by **Daniel Marr · [think3.co](https://think3.co)**.
+Application licence: **GPL-3.0-or-later** (see [LICENSE](LICENSE)).
 
-Application licence: GPL-3.0-or-later (LICENSE).
+## Artwork
 
-Third-party code and guidance:
-- perfect-freehand stroke-outline algorithm by Steve Ruiz (MIT), used via the `freedraw` Rust port (MIT).
-- Rnote (GPL-3.0-or-later, https://github.com/flxzt/rnote) is studied as a reference for GTK4 ink handling; any ported code will be attributed here explicitly.
-- Placeholder app icon (packaging/icons/.../co.think3.OmaInk.svg) is original to this project; replace before release.
+- **App icon / logo** (`packaging/logo/OmaInk.svg`, installed as
+  `co.think3.OmaInk.svg`): by Daniel Marr. *Origin of the logo's design
+  elements is being confirmed before public release.*
+- **Toolbar and sidebar glyphs**: drawn in code (cairo). The pan (hand), copy,
+  paste (clipboard) and help (circle-help) glyphs are traced from
+  [Lucide](https://lucide.dev) icons — ISC License, Copyright (c) Lucide
+  Contributors. All other glyphs (pens, highlighter, eraser, lasso, insert
+  space, settings gear, text, shapes, page) are original to this project.
+- **Community App badge** in the README:
+  [tcballard/omarchy-badges](https://github.com/tcballard/omarchy-badges)
+  (linked remotely, not bundled). It is an identity label, not official
+  approval. The Omarchy name and logo belong to their owners.
 
-## Lucide icons
+## Code and algorithms
 
-The pan (hand), copy and paste toolbar glyphs are traced from Lucide's
-`hand`, `copy` and `clipboard` icons
-(https://lucide.dev), ISC License, Copyright (c) Lucide Contributors.
+- Stroke outlines for highlighters use the **perfect-freehand** algorithm by
+  Steve Ruiz (MIT) via the Rust port [`freedraw`](https://crates.io/crates/freedraw)
+  (MIT). Pen and pencil strokes use OmaInk's own renderer.
+- [Rnote](https://github.com/flxzt/rnote) (GPL-3.0-or-later) was studied as a
+  reference for GTK4 stylus handling. **No Rnote code is included.**
+- Built on [gtk4-rs](https://gtk-rs.org) and libadwaita-rs (MIT) against the
+  system GTK 4 and libadwaita libraries (LGPL-2.1-or-later, dynamically
+  linked).
+- All other Rust dependencies (see `Cargo.lock`) are under permissive
+  licences (MIT, Apache-2.0, BSD-3-Clause, Unicode-3.0, Unlicense). Binary
+  releases must ship their notices; this release is source-only.

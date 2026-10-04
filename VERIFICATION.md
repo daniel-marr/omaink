@@ -1,12 +1,25 @@
 # Verification
 
-Input identity: working tree at first scaffold commit (see git history; EVIDENCE.sha256 snapshot deferred until a release candidate).
+Input identity: git working tree of the `0.1.0-alpha.1` release-preparation commit (this file is committed with it; see `git log -1 -- VERIFICATION.md`). No SHA-256 manifest yet; the source archive's checksum is recorded when the release is published.
 Upstream revision: none (original project, no upstream).
-Toolchain/platform: rustc 1.98.1 (Arch Linux 1:1.98.1-1), gtk4 1:4.22.4-1, libadwaita 1:1.9.3-1, Omarchy 4.0.4-1 / Hyprland (Wayland), x86_64.
+Toolchain/platform: rustc 1.98.1 (Arch Linux 1:1.98.1-1), gtk4 1:4.22.4-1, libadwaita 1:1.9.3-1, Omarchy 4.0.4-1 / Hyprland (Wayland), x86_64. Pen: XP-Pen Artist 15.6 Pro on the kernel `uclogic` driver.
 
 ## Reproduced now
 
-Run 2026-10-01 on the development machine (Omarchy 4.0.4, live Hyprland session):
+Run 2026-10-04 on the development machine, on the release-preparation tree:
+
+- `cargo build --workspace --locked` — exit 0.
+- `cargo test --workspace --locked` — exit 0; 68 passed, 0 failed (omaink-core 19, omaink-store 26, omaink-ink 11, omaink-gtk 9 incl. GTK editor-layout tests in the live Wayland session, omaink-theme 3).
+- `desktop-file-validate packaging/co.think3.OmaInk.desktop` — exit 0, no warnings.
+- `packaging/install-local.sh` — installed `~/.local/bin/omaink`, the desktop entry and icon; `gtk-launch co.think3.OmaInk` started `/home/<user>/.local/bin/omaink` with window `class: co.think3.OmaInk`.
+
+These prove build/test/static checks and a scripted launch, not desktop acceptance of every feature.
+
+## Historical
+
+Earlier results, each on the source of its own date (kept verbatim; not re-run for this release unless listed above).
+
+### M0 scaffold — first build and window check (2026-10-01, development machine, live Hyprland session)
 
 - `cargo build --workspace` — exit 0.
 - `cargo test --workspace` — exit 0 (2 passed: `omaink-core` id ordering, `omaink-ink` serde roundtrip).
@@ -89,6 +102,17 @@ Pen and pencil strokes switched from the perfect-freehand outline to a union of 
 
 GPU fill time is not measured by the harness. Highlighters still use the freehand outline.
 
+### Text, sidebar, settings and page — user-driven iteration (2026-10-03/04)
+
+Checked interactively by the user on the live session while being built; scope is what the user reported, not an exhaustive test:
+
+- Text boxes and flyout (style, list type, size, colour; selection outlines; editing in place on the rule lines) — user approved after fixes.
+- Sidebar title search (aligned with the page top) and notes multi-select (Ctrl/Shift+click) — user approved ("ok great").
+- Settings window — user: "looks fine". Folder change via the real portal picker, and each option's live effect, were not individually confirmed.
+- Growing page (half a screen below content, right padding = margin distance) — user: "everything is working great". The Insert space tool was not explicitly confirmed.
+- Narrow-window toolbar (scrolling pen strip) — user accepted ("that will do"); edge fades and strip scrolling not explicitly confirmed.
+- Rename to OmaInk with data migration on this machine — verified (settings, state and notebooks moved; app launched as `co.think3.OmaInk`).
+
 ### Pen side buttons — live acceptance (2026-10-04, user-performed)
 
 XP-Pen Artist 15.6 Pro on the kernel `uclogic` driver (the vendor XP-Pen driver, `xppentablet.service`, was uninstalled by the user: while it ran it remapped the side buttons and none reached the app). Raw events logged with `OMAINK_DEBUG_PEN=1`:
@@ -104,14 +128,17 @@ XP-Pen Artist 15.6 Pro on the kernel `uclogic` driver (the vendor XP-Pen driver,
 - Drags from Chrome (running under XWayland) never reached the window at all.
 - Decision (user): drag-and-drop removed for now; insert-from-file via the toolbar button remains. Revisit if a safe path exists (e.g. COPY-capable sources, or accepting MOVE only after confirming the source keeps the file).
 
-## Historical
-
-None.
-
 ## Failed
 
-None recorded.
+- **Unfocused-window dimming opt-out** (2026-10-01 → 2026-10-04): a Hyprland rule in the user's own `hyprland.lua` (`opacity "1.0 override 1.0 override"` for `co.think3.OmaInk`) did not stop Omarchy dimming the unfocused window on this setup; removed at the user's request. Not part of this repo. OmaInk itself does not change window opacity.
+- **Pen side buttons with the XP-Pen vendor driver** (2026-10-04): while `xppentablet.service` ran, side-button presses never reached the app (the driver remaps them). Resolved on this machine by the user uninstalling the vendor driver; vendor-driver support is not implemented (see README limitations).
 
 ## Not run
 
-Stylus/tablet input (XP-Pen Artist 15.6 Pro axes unverified in-app), ink rendering, persistence, theme adaptation and hot reload, launcher (`.desktop`) start from the app menu (desktop entry not yet installed to a searched path), GUI tests, package build, installation, upgrade, removal, multi-monitor/scaling checks, and any non-development-machine Omarchy acceptance.
+- CI in the Arch Linux container (`.github/workflows/ci.yml`): first run happens on the first push.
+- Starting OmaInk from the Omarchy app launcher (installed and validated; awaiting a user check of the launcher entry and icon).
+- Fresh install on any machine other than the development machine; other Omarchy versions.
+- Other pens and tablets, vendor tablet drivers, touch input, mouse-only use beyond development.
+- HiDPI scaling and multi-monitor scaling differences (used on two monitors at scale 1 only).
+- System package build, install, upgrade or removal (no package exists; per-user script only).
+- Export/print (not implemented).

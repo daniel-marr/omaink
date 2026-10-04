@@ -9,10 +9,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
+authors = ["Daniel Marr (think3.co)"]
 license = "GPL-3.0-or-later"
-repository = "https://github.com/think3co/omaink"
+repository = "https://github.com/daniel-marr/omaink"
 rust-version = "1.92"
 
 [workspace.dependencies]

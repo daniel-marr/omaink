@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "omaink-core"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "kurbo",
  "serde",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "omaink-gtk"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "gtk4",
  "kurbo",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "omaink-ink"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "freedraw",
  "kurbo",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "omaink-store"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "kurbo",
  "omaink-core",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "omaink-theme"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "omaink-core",
  "serde",

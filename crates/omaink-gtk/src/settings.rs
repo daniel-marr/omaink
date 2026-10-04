@@ -311,6 +311,7 @@ pub fn present_settings(
         row
     };
     about.add(&info(NAME_MARKUP, &format!("Version {} · GPL-3.0-or-later", env!("CARGO_PKG_VERSION"))));
+    about.add(&info("Created by", "Daniel Marr · think3.co"));
     about.add(&info("Settings file", &store::config_dir().join("settings.toml").display().to_string()));
     about.add(&info("App state", &store::state_dir().display().to_string()));
     about.add(&info("Cache", &store::cache_dir().display().to_string()));

@@ -231,8 +231,8 @@ fn draw_pen(cr: &gtk::cairo::Context, tool: Tool, rgba: gdk::RGBA, w: f64, h: f6
         }
 }
 
-/// Eraser: the pencil chip's barrel turned over — dark stem, metal
-/// ferrule and a pink eraser at the bottom.
+/// Eraser: a tilted pink-and-white eraser mid-swipe, with a short wipe
+/// trail beneath it.
 fn eraser_glyph() -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_width(26);
@@ -242,30 +242,29 @@ fn eraser_glyph() -> gtk::DrawingArea {
 }
 
 fn draw_eraser(cr: &gtk::cairo::Context, w: f64, h: f64) {
-    let cx = w / 2.0;
-    let bw = w * 0.40;
-    // Barrel, full height down to the ferrule (no sharpened tip).
-    cr.set_source_rgb(0.18, 0.19, 0.25);
-    rounded_rect(cr, cx - bw / 2.0, h * 0.04, bw, h * 0.76, 2.0);
-    let _ = cr.fill();
-    // Metal ferrule with two crimp lines.
-    cr.set_source_rgb(0.66, 0.68, 0.74);
-    cr.rectangle(cx - bw / 2.0, h * 0.78, bw, h * 0.07);
-    let _ = cr.fill();
-    cr.set_source_rgba(0.35, 0.36, 0.42, 0.9);
-    cr.set_line_width(0.8);
-    for y in [0.80, 0.83] {
-        cr.move_to(cx - bw / 2.0, h * y);
-        cr.line_to(cx + bw / 2.0, h * y);
-    }
-    let _ = cr.stroke();
-    // Pink eraser, rounded at the end.
+    let _ = cr.save();
+    cr.translate(w * 0.52, h * 0.42);
+    cr.rotate(0.6);
+    let (bw, bh) = (w * 0.44, h * 0.54);
     cr.set_source_rgb(0.94, 0.45, 0.55);
-    rounded_rect(cr, cx - bw / 2.0, h * 0.85 - 2.0, bw, h * 0.11 + 2.0, 2.5);
+    rounded_rect(cr, -bw / 2.0, -bh / 2.0, bw, bh, 3.0);
     let _ = cr.fill();
-    cr.set_source_rgb(0.66, 0.68, 0.74);
-    cr.rectangle(cx - bw / 2.0, h * 0.84, bw, 1.0);
+    // White sleeve end: rounded top corners, square where it meets the pink.
+    cr.set_source_rgb(0.95, 0.95, 0.97);
+    rounded_rect(cr, -bw / 2.0, -bh / 2.0, bw, bh * 0.38, 3.0);
+    cr.rectangle(-bw / 2.0, -bh / 2.0 + 3.0, bw, bh * 0.38 - 3.0);
     let _ = cr.fill();
+    let _ = cr.restore();
+    // Wipe trail.
+    cr.set_source_rgba(0.75, 0.79, 0.96, 0.85);
+    cr.set_line_width(1.8);
+    cr.set_line_cap(gtk::cairo::LineCap::Round);
+    cr.move_to(w * 0.12, h * 0.90);
+    cr.line_to(w * 0.62, h * 0.90);
+    let _ = cr.stroke();
+    cr.move_to(w * 0.20, h * 0.80);
+    cr.line_to(w * 0.40, h * 0.80);
+    let _ = cr.stroke();
 }
 
 /// Insert-image icon: a framed picture (mountains + sun) with a plus badge,

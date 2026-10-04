@@ -704,7 +704,6 @@ impl Sidebar {
             ("Toolbar image button", "Insert images from files"),
             ("Right-click / hold an image", "Pin to background / delete"),
             ("Pen button", "Toggle eraser"),
-            ("O", "Debug overlay"),
         ] {
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
             let key = gtk::Label::new(Some(k));

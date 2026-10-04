@@ -111,6 +111,10 @@ fn build_window(app: &adw::Application) {
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&canvas));
     canvas.attach_editor_host(&overlay);
+    // Pen diagnostics (pressure/tilt/sample rate): opt-in at launch only.
+    if std::env::var_os("OMASCRATCH_DEBUG_OVERLAY").is_some() {
+        canvas.toggle_debug_overlay();
+    }
 
     let content_view = adw::ToolbarView::new();
     content_view.set_top_bar_style(adw::ToolbarStyle::Flat);
@@ -320,10 +324,6 @@ fn install_shortcuts(
             }
             gdk::Key::Escape if c.has_selection() => {
                 c.clear_selection();
-                glib::Propagation::Stop
-            }
-            gdk::Key::o | gdk::Key::O if !ctrl => {
-                c.toggle_debug_overlay();
                 glib::Propagation::Stop
             }
             _ => glib::Propagation::Proceed,

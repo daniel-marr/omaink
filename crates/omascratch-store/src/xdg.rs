@@ -63,6 +63,12 @@ impl Settings {
         }
     }
 
+    /// True once the user has picked (or accepted) a notebooks folder:
+    /// a settings file exists.
+    pub fn exists(config_dir: &Path) -> bool {
+        config_dir.join("settings.toml").exists()
+    }
+
     pub fn save(&self, config_dir: &Path) -> crate::error::Result<()> {
         std::fs::create_dir_all(config_dir)
             .map_err(|e| crate::error::StoreError::io(config_dir, e))?;
@@ -128,5 +134,50 @@ mod tests {
         std::fs::write(dir.path().join("settings.toml"), "not = [valid").unwrap();
         let fallback = Settings::load_or_default(dir.path());
         assert_eq!(fallback.notebooks_root, default_notebooks_root());
+    }
+}
+
+/// Check a folder chosen as the notebooks root: it must be writable and must
+/// not be one of the app's own config/state/cache folders, or inside the
+/// `current` notebooks root (a notebook folder is not a root).
+pub fn validate_notebooks_root(path: &Path, current: Option<&Path>) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("Choose a full folder path.".into());
+    }
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let target = canon(path);
+    for (dir, what) in [(config_dir(), "settings"), (state_dir(), "app state"), (cache_dir(), "cache")] {
+        if target.starts_with(canon(&dir)) {
+            return Err(format!("That folder is inside OmaScratch's {what} folder; choose somewhere else."));
+        }
+    }
+    if let Some(cur) = current {
+        let cur = canon(cur);
+        if target != cur && target.starts_with(&cur) {
+            return Err("That folder is inside your current notebooks folder; choose the folder that holds your notebooks.".into());
+        }
+    }
+    std::fs::create_dir_all(&target).map_err(|e| format!("Can't create that folder: {e}"))?;
+    let probe = target.join(".omascratch-write-test");
+    std::fs::write(&probe, b"ok").map_err(|e| format!("Can't write to that folder: {e}"))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+
+    #[test]
+    fn notebooks_root_validation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Notes");
+        assert!(validate_notebooks_root(&root, None).is_ok(), "creatable, writable folder");
+        assert!(root.is_dir() && !root.join(".omascratch-write-test").exists(), "probe cleaned up");
+        let inner = root.join("My Notebook");
+        assert!(validate_notebooks_root(&inner, Some(&root)).is_err(), "inside current root");
+        assert!(validate_notebooks_root(&root, Some(&root)).is_ok(), "same folder is fine");
+        assert!(validate_notebooks_root(Path::new("relative/dir"), None).is_err());
+        assert!(validate_notebooks_root(&config_dir().join("x"), None).is_err(), "app config folder");
     }
 }

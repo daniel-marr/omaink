@@ -5,6 +5,7 @@ mod app;
 mod canvas;
 mod library;
 mod perf;
+mod settings;
 mod sidebar;
 mod storage;
 mod text;

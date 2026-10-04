@@ -50,6 +50,7 @@ struct Inner {
     on_rename_note: RefCell<Option<Box<dyn Fn(&Path, &str)>>>,
     on_notebook_renamed: RefCell<Option<Box<dyn Fn(&Path, &Path)>>>,
     on_notebook_deleted: RefCell<Option<Box<dyn Fn(&Path)>>>,
+    on_settings: RefCell<Option<Box<dyn Fn()>>>,
 }
 
 impl Sidebar {
@@ -150,6 +151,7 @@ impl Sidebar {
             on_rename_note: RefCell::new(None),
             on_notebook_renamed: RefCell::new(None),
             on_notebook_deleted: RefCell::new(None),
+            on_settings: RefCell::new(None),
         });
         let sidebar = Sidebar { widget, header: header.clone(), inner: inner.clone() };
 
@@ -210,7 +212,14 @@ impl Sidebar {
 
         sidebar.build_switcher_popover(&switcher);
         sidebar.build_help_popover(&help_btn);
-        sidebar.build_settings_popover(&gear_btn);
+        {
+            let sb = sidebar.clone();
+            gear_btn.connect_clicked(move |_| {
+                if let Some(f) = sb.inner.on_settings.borrow().as_ref() {
+                    f();
+                }
+            });
+        }
         {
             let sb = sidebar.clone();
             search.connect_search_changed(move |e| {
@@ -227,6 +236,11 @@ impl Sidebar {
         }
         sidebar.refresh();
         sidebar
+    }
+
+    /// The gear button: the app opens its Settings window.
+    pub fn set_on_settings(&self, f: impl Fn() + 'static) {
+        *self.inner.on_settings.borrow_mut() = Some(Box::new(f));
     }
 
     pub fn set_on_open_note(&self, f: impl Fn(&Path) + 'static) {
@@ -798,35 +812,6 @@ impl Sidebar {
             line.append(&desc);
             vbox.append(&line);
         }
-        popover.set_child(Some(&vbox));
-        button.connect_clicked(move |_| popover.popup());
-    }
-
-    fn build_settings_popover(&self, button: &gtk::Button) {
-        let sb = self.clone();
-        let popover = gtk::Popover::new();
-        popover.set_parent(button);
-        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        vbox.set_margin_top(10);
-        vbox.set_margin_bottom(10);
-        vbox.set_margin_start(12);
-        vbox.set_margin_end(12);
-        let heading = gtk::Label::new(Some("Settings"));
-        heading.add_css_class("heading");
-        heading.set_xalign(0.0);
-        vbox.append(&heading);
-        let root = gtk::Label::new(Some(&format!(
-            "Notebooks folder:\n{}",
-            sb.inner.library.root.display()
-        )));
-        root.set_xalign(0.0);
-        root.add_css_class("dim-label");
-        root.set_wrap(true);
-        vbox.append(&root);
-        let soon = gtk::Label::new(Some("More settings coming soon."));
-        soon.set_xalign(0.0);
-        soon.add_css_class("dim-label");
-        vbox.append(&soon);
         popover.set_child(Some(&vbox));
         button.connect_clicked(move |_| popover.popup());
     }

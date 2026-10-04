@@ -18,7 +18,16 @@ pub fn run() -> glib::ExitCode {
         builder = builder.flags(gtk4::gio::ApplicationFlags::NON_UNIQUE);
     }
     let app = builder.build();
-    app.connect_activate(build_window);
+    app.connect_activate(|app| {
+        // First launch: ask where notebooks live before building the window.
+        if !omascratch_store::Settings::exists(&omascratch_store::config_dir()) {
+            crate::theme::preload();
+            let app2 = app.clone();
+            crate::settings::present_welcome(app, std::rc::Rc::new(move |_| build_window(&app2)));
+        } else {
+            build_window(app);
+        }
+    });
     app.run()
 }
 
@@ -236,6 +245,40 @@ fn build_window(app: &adw::Application) {
             glib::Propagation::Proceed
         });
         window.add_controller(find);
+    }
+    // Settings (gear). Changing the notebooks folder saves the open note,
+    // then rebuilds the window against the new folder.
+    {
+        let win = window.downgrade();
+        let app = app.clone();
+        let storage = storage.clone();
+        let canvas = canvas.clone();
+        let root = library.root.clone();
+        sidebar.set_on_settings(move || {
+            let Some(w) = win.upgrade() else { return };
+            let win = win.clone();
+            let app = app.clone();
+            let storage = storage.clone();
+            let canvas = canvas.clone();
+            crate::settings::present_settings(
+                w.upcast_ref(),
+                root.clone(),
+                std::rc::Rc::new(move |_new_root| {
+                    let Some(w) = win.upgrade() else { return };
+                    if let Err(e) = storage.save_final(&canvas) {
+                        let d = adw::AlertDialog::new(
+                            Some("Could not save your note"),
+                            Some(&format!("{e}\n\nThe notebooks folder was changed; it takes effect after the next restart.")),
+                        );
+                        d.add_response("ok", "OK");
+                        d.present(Some(&w));
+                        return;
+                    }
+                    w.destroy();
+                    build_window(&app);
+                }),
+            );
+        });
     }
     install_close_handler(&window, &storage, &canvas);
     // Keep the theme manager (CSS provider + file watcher) alive with the window.

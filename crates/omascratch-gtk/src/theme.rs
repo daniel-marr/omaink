@@ -70,6 +70,23 @@ fn canvas_palette(p: &Palette) -> CanvasPalette {
     }
 }
 
+/// Apply the current Omarchy theme to the app chrome before any main window
+/// exists (the first-run welcome). The main window's `Manager` takes over
+/// (and hot-reloads) once it starts.
+pub fn preload() {
+    let provider = gtk::CssProvider::new();
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+    let palette = Manager::load_palette();
+    provider.load_from_string(&palette.app_css());
+    adw::StyleManager::default().set_color_scheme(if palette.dark {
+        adw::ColorScheme::ForceDark
+    } else {
+        adw::ColorScheme::ForceLight
+    });
+}
+
 pub struct Manager {
     provider: gtk::CssProvider,
     canvas: glib::WeakRef<CanvasView>,

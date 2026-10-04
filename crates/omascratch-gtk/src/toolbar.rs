@@ -231,8 +231,8 @@ fn draw_pen(cr: &gtk::cairo::Context, tool: Tool, rgba: gdk::RGBA, w: f64, h: f6
         }
 }
 
-/// Eraser: the pencil chip turned over — wood tip up, the same dark
-/// barrel, then a metal ferrule and a pink eraser at the bottom.
+/// Eraser: the pencil chip's barrel turned over — dark stem, metal
+/// ferrule and a pink eraser at the bottom.
 fn eraser_glyph() -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_width(26);
@@ -244,22 +244,9 @@ fn eraser_glyph() -> gtk::DrawingArea {
 fn draw_eraser(cr: &gtk::cairo::Context, w: f64, h: f64) {
     let cx = w / 2.0;
     let bw = w * 0.40;
-    // Sharpened wood cone with a graphite point, pointing up.
-    cr.set_source_rgb(0.82, 0.68, 0.46);
-    cr.move_to(cx - bw / 2.0, h * 0.38);
-    cr.line_to(cx + bw / 2.0, h * 0.38);
-    cr.line_to(cx, h * 0.04);
-    cr.close_path();
-    let _ = cr.fill();
-    cr.set_source_rgb(0.30, 0.31, 0.38);
-    cr.move_to(cx - bw * 0.18, h * 0.16);
-    cr.line_to(cx + bw * 0.18, h * 0.16);
-    cr.line_to(cx, h * 0.04);
-    cr.close_path();
-    let _ = cr.fill();
-    // Barrel.
+    // Barrel, full height down to the ferrule (no sharpened tip).
     cr.set_source_rgb(0.18, 0.19, 0.25);
-    cr.rectangle(cx - bw / 2.0, h * 0.38, bw, h * 0.40);
+    rounded_rect(cr, cx - bw / 2.0, h * 0.04, bw, h * 0.76, 2.0);
     let _ = cr.fill();
     // Metal ferrule with two crimp lines.
     cr.set_source_rgb(0.66, 0.68, 0.74);

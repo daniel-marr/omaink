@@ -20,7 +20,16 @@ cargo test --workspace
 
 ## Install and rollback
 
-No package exists yet; nothing is installed system-wide. Running the development binary writes only to XDG app directories (`~/.config/omaink`, `~/.local/state/omaink`, `~/.cache/omaink`) and the chosen notebooks folder (default `~/Documents/OmaInk`). Remove those paths to fully revert; notebooks are plain files you own. Packaging (PKGBUILD) is a later milestone.
+No system package exists yet. For a per-user install (no root) that adds OmaInk to the app launcher:
+
+```sh
+packaging/install-local.sh              # release build → ~/.local/bin/omaink + launcher + icon
+packaging/install-local.sh --uninstall  # remove exactly those three files
+```
+
+It installs `~/.local/bin/omaink`, `~/.local/share/applications/co.think3.OmaInk.desktop` and `~/.local/share/icons/hicolor/scalable/apps/co.think3.OmaInk.svg`, then refreshes the desktop and icon caches. `~/.local/bin` must be on the session PATH (it is on Omarchy).
+
+The app itself writes only to XDG app directories (`~/.config/omaink`, `~/.local/state/omaink`, `~/.cache/omaink`) and the chosen notebooks folder (default `~/Documents/OmaInk`). Uninstalling never touches those; remove them by hand to fully revert. Notebooks are plain files you own. A system package (PKGBUILD) is a later milestone.
 
 ## Layout
 

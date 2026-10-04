@@ -77,6 +77,18 @@ fn build_window(app: &adw::Application) {
     zoom_btn.add_css_class("flat");
     zoom_btn.add_css_class("zoom-indicator");
     zoom_btn.set_tooltip_text(Some("Zoom — click for 100% (Ctrl+0 resets view)"));
+    let zoom_out_btn = gtk::Button::with_label("−");
+    zoom_out_btn.add_css_class("flat");
+    zoom_out_btn.set_tooltip_text(Some("Zoom out (Ctrl+−)"));
+    let zoom_in_btn = gtk::Button::with_label("+");
+    zoom_in_btn.add_css_class("flat");
+    zoom_in_btn.set_tooltip_text(Some("Zoom in (Ctrl+=)"));
+    {
+        let c = canvas.clone();
+        zoom_out_btn.connect_clicked(move |_| c.zoom_step(false));
+        let c = canvas.clone();
+        zoom_in_btn.connect_clicked(move |_| c.zoom_step(true));
+    }
     {
         let c = canvas.clone();
         zoom_btn.connect_clicked(move |_| c.zoom_to_100());
@@ -88,7 +100,11 @@ fn build_window(app: &adw::Application) {
 
     let toolbar_end = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     toolbar_end.set_margin_end(8);
-    toolbar_end.append(&zoom_btn);
+    let zoom_group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    zoom_group.append(&zoom_out_btn);
+    zoom_group.append(&zoom_btn);
+    zoom_group.append(&zoom_in_btn);
+    toolbar_end.append(&zoom_group);
     toolbar_end.append(&fs_btn);
     toolbar.set_end_widget(Some(&toolbar_end));
 
@@ -226,6 +242,27 @@ fn install_shortcuts(
     split: &adw::OverlaySplitView,
     toggle_fullscreen: impl Fn() + 'static,
 ) {
+    // Home → top-left of the page. Capture phase so the sidebar list doesn't
+    // take it, but left alone while typing (text boxes, rename fields).
+    {
+        let home = gtk::EventControllerKey::new();
+        home.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let c = canvas.clone();
+        let win = window.clone();
+        home.connect_key_pressed(move |_, key, _, modifiers| {
+            let typing = gtk::prelude::GtkWindowExt::focus(&win)
+                .is_some_and(|w| w.is::<gtk::TextView>() || w.is::<gtk::Text>() || w.is::<gtk::Editable>());
+            if matches!(key, gdk::Key::Home | gdk::Key::KP_Home)
+                && !typing
+                && !modifiers.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::ALT_MASK)
+            {
+                c.go_home();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(home);
+    }
     let keys = gtk::EventControllerKey::new();
     let c = canvas.clone();
     let split = split.clone();

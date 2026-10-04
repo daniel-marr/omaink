@@ -1815,6 +1815,12 @@ impl CanvasView {
         self.queue_draw();
     }
 
+    /// Home: scroll to the page's top-left corner, keeping the zoom.
+    pub fn go_home(&self) {
+        self.imp().state.borrow_mut().offset = kurbo::Vec2::ZERO;
+        self.queue_draw();
+    }
+
     pub fn reset_view(&self) {
         let mut st = self.imp().state.borrow_mut();
         st.offset = kurbo::Vec2::ZERO;

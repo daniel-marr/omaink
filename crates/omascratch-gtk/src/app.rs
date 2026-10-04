@@ -119,6 +119,11 @@ fn build_window(app: &adw::Application) {
     let content_view = adw::ToolbarView::new();
     content_view.set_top_bar_style(adw::ToolbarStyle::Flat);
     content_view.add_top_bar(&toolbar);
+    // The sidebar's NOTES header is exactly as tall as the draw toolbar, so
+    // the search box below it starts level with the top of the page.
+    let top_rows = gtk::SizeGroup::new(gtk::SizeGroupMode::Vertical);
+    top_rows.add_widget(&toolbar);
+    top_rows.add_widget(&sidebar.header);
     content_view.set_content(Some(&overlay));
 
     // Split view: sidebar | content. Narrower than before.

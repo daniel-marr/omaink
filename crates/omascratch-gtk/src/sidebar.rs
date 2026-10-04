@@ -28,6 +28,9 @@ enum RowRef {
 #[derive(Clone)]
 pub struct Sidebar {
     pub widget: gtk::Box,
+    /// NOTES header; the app size-groups it with the draw toolbar so the
+    /// search box starts level with the top of the page.
+    pub header: gtk::Box,
     inner: Rc<Inner>,
 }
 
@@ -58,8 +61,7 @@ impl Sidebar {
         // Header: notebook actions.
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         header.add_css_class("sidebar-header");
-        header.set_margin_top(12);
-        header.set_margin_bottom(6);
+        header.set_valign(gtk::Align::Fill);
         header.set_margin_start(14);
         header.set_margin_end(10);
         let title = gtk::Label::new(Some("NOTES"));
@@ -149,7 +151,7 @@ impl Sidebar {
             on_notebook_renamed: RefCell::new(None),
             on_notebook_deleted: RefCell::new(None),
         });
-        let sidebar = Sidebar { widget, inner: inner.clone() };
+        let sidebar = Sidebar { widget, header: header.clone(), inner: inner.clone() };
 
         // Single click / Enter: open a note, or toggle a folder's collapse.
         {

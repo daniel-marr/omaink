@@ -1,0 +1,24 @@
+[package]
+name = "omaink-gtk"
+description = "OmaInk GTK4 + libadwaita shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "omaink"
+path = "src/main.rs"
+
+[dependencies]
+omaink-core.workspace = true
+omaink-ink.workspace = true
+omaink-store.workspace = true
+omaink-theme.workspace = true
+gtk4.workspace = true
+libadwaita.workspace = true
+tracing.workspace = true
+kurbo.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true

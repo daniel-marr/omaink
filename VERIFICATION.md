@@ -9,9 +9,9 @@ Toolchain/platform: rustc 1.98.1 (Arch Linux 1:1.98.1-1), gtk4 1:4.22.4-1, libad
 Run 2026-10-01 on the development machine (Omarchy 4.0.4, live Hyprland session):
 
 - `cargo build --workspace` — exit 0.
-- `cargo test --workspace` — exit 0 (2 passed: `omascratch-core` id ordering, `omascratch-ink` serde roundtrip).
-- `desktop-file-validate packaging/co.think3.OmaScratch.desktop` — exit 0, no warnings.
-- `./target/debug/omascratch` launched in the live Hyprland session; `hyprctl clients` showed the window `mapped: 1`, `class: co.think3.OmaScratch`, `initialClass: co.think3.OmaScratch`, `xwayland: 0`. Window closed cleanly.
+- `cargo test --workspace` — exit 0 (2 passed: `omaink-core` id ordering, `omaink-ink` serde roundtrip).
+- `desktop-file-validate packaging/co.think3.OmaInk.desktop` — exit 0, no warnings.
+- `./target/debug/omaink` launched in the live Hyprland session; `hyprctl clients` showed the window `mapped: 1`, `class: co.think3.OmaInk`, `initialClass: co.think3.OmaInk`, `xwayland: 0`. Window closed cleanly.
   - Note: GDK logged a Vulkan `VK_ERROR_INCOMPATIBLE_DRIVER` warning and fell back to the GL renderer on this machine. Track renderer choice when ink performance is measured.
 
 ### M1 ink slice — live Hyprland acceptance (2026-10-01, user-performed)
@@ -29,7 +29,7 @@ Hardware: XP-Pen Artist 15.6 Pro (kernel `uclogic`, Wayland tablet-v2), Omarchy 
 
 Omarchy 4.0.4 live session, user drawing with the XP-Pen, verified by inspecting the on-disk `.omanote` (zstd+JSON):
 
-- First-run creation: launching with no data created `~/.config/omascratch/settings.toml`, `~/Documents/OmaScratch/My Notebook/notebook.json`, and a first `.omanote` (schema 1, empty `elements`). Settings and notebook metadata are human-readable TOML/JSON as designed.
+- First-run creation: launching with no data created `~/.config/omaink/settings.toml`, `~/Documents/OmaInk/My Notebook/notebook.json`, and a first `.omanote` (schema 1, empty `elements`). Settings and notebook metadata are human-readable TOML/JSON as designed.
 - Clean-close save: drew 5 strokes, closed the window; final-save handler wrote all 5 strokes (9.3 KB note).
 - Reopen round-trip: strokes reloaded onto the canvas (user-confirmed).
 - Crash recovery cycle 1: drew more (19 elements on disk via debounced autosave), `kill -9` with no clean shutdown; reopen recovered all 19, no stale `.omatmp-*` debris.
@@ -43,7 +43,7 @@ Obsidian-style sidebar on the live session; verified interactively by the user:
 - Notebook → Folders (nestable) → Notes tree; single-click opens a note, single-click toggles folder collapse.
 - Create/rename/delete of notebooks, folders and notes; rename works inline (double-click), via the ⋯ menu, and on the canvas title — two-way synced (sidebar ↔ canvas). Renaming the open note routes through storage (synchronous title write) so autosave cannot revert it.
 - Drag-and-drop: note into folder, note reorder, folder reorder/nest — all via fractional order keys (only the moved item's file is rewritten).
-- Collapsed-folder state persists across restarts (`~/.local/state/omascratch/view.json`).
+- Collapsed-folder state persists across restarts (`~/.local/state/omaink/view.json`).
 - Chrome: no window title bar; full-width top toolbar (reserved for M4 draw tools) matching the sidebar; on-canvas editable page title; fullscreen-canvas toggle (button + F11); F9 toggles sidebar.
 - A use-after-free crash (rebuilding the list inside a row widget's own signal) was found and fixed by deferring rebuilds to an idle tick; confirmed stable afterward.
 - `cargo test --workspace` — exit 0 (32 passed: core incl. 5 fractional-order tests, ink, store incl. library CRUD + view-state + conflicted-copy + interrupted-write).
@@ -52,7 +52,7 @@ Obsidian-style sidebar on the live session; verified interactively by the user:
 
 All verified interactively by the user on the live session through many build-test rounds:
 
-- OneNote fluid toolbar: pen-preset chips (drawn glyphs with live color tips), click-again flyout (stroke preview, −/dots/+ thickness, Recent Colors, arranged color grid, More Colors dialog, Remove Pen), Add Pen menu, eraser chip with Stroke/Small/Medium/Large flyout; pen set, eraser config, recent colors and shape style persist (`~/.local/state/omascratch/toolbar.json`).
+- OneNote fluid toolbar: pen-preset chips (drawn glyphs with live color tips), click-again flyout (stroke preview, −/dots/+ thickness, Recent Colors, arranged color grid, More Colors dialog, Remove Pen), Add Pen menu, eraser chip with Stroke/Small/Medium/Large flyout; pen set, eraser config, recent colors and shape style persist (`~/.local/state/omaink/toolbar.json`).
 - Area erasers split strokes into fragments (live preview, exact undo); highlighters have flat chisel ends (no start blob).
 - Select (click/drag), Lasso (enclose/move/delete), Hand pan tool; selection copy/cut/paste (Ctrl+C/X/V + toolbar buttons), paste offset + preselected.
 - Shapes: line/arrow/rect/ellipse as a dedicated `shape` stroke type (constant-width paths; preview == committed), Shift constrains (square/circle/45°), own thickness+color flyout.
@@ -65,11 +65,11 @@ All verified interactively by the user on the live session through many build-te
 
 ### Performance — reproduced benchmark (2026-10-03, release build, this machine)
 
-Harness: `crates/omascratch-store/examples/gen_stress.rs` builds an isolated profile (1 note × 5,000 handwriting-like strokes + 300 notes in 10 folders, 39 MB); `OMASCRATCH_PERF=1 ./target/release/omascratch` (with `XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME` pointed at the profile) runs a scripted pan, eraser sweep, lasso and select hit-test, logs `[perf]` lines and quits. CPU time of our code only (snapshot construction, hit tests) — GPU rasterization is not measured.
+Harness: `crates/omaink-store/examples/gen_stress.rs` builds an isolated profile (1 note × 5,000 handwriting-like strokes + 300 notes in 10 folders, 39 MB); `OMAINK_PERF=1 ./target/release/omaink` (with `XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME` pointed at the profile) runs a scripted pan, eraser sweep, lasso and select hit-test, logs `[perf]` lines and quits. CPU time of our code only (snapshot construction, hit tests) — GPU rasterization is not measured.
 
 | Measure | Before | After |
 |---|---|---|
-| Sidebar `rows()` | ~900 ms, 3× at startup | 254 ms cold (header-only decode) · 0.4–0.7 ms warm (mtime/size cache in `~/.cache/omascratch/note-meta.json`) |
+| Sidebar `rows()` | ~900 ms, 3× at startup | 254 ms cold (header-only decode) · 0.4–0.7 ms warm (mtime/size cache in `~/.cache/omaink/note-meta.json`) |
 | Eraser hit-test | 2.17 ms/sample | 0.006 ms/sample (per-stroke bounds prefilter) |
 | Pan frame (snapshot) | 1.66 ms avg, 2.95 max | 0.33 ms avg, 0.98 max (bounds cached per revision, not per frame) |
 | Big-note open (read+decode) | 285 ms | 264–285 ms (unchanged — JSON point encoding; follow-up) |

@@ -1,4 +1,4 @@
-# OmaScratch
+# OmaInk
 
 <img alt="Built for Omarchy: App" height="20" src="https://raw.githubusercontent.com/tcballard/omarchy-badges/75975e5b5bf75e7ede3764bcd2950046f7abfe2c/badges/v1/omarchy-app.svg">
 
@@ -15,21 +15,21 @@ Requires Rust (1.92+), GTK4 (4.14+) and libadwaita (1.6+) development libraries.
 ```sh
 cargo build --workspace
 cargo test --workspace
-./target/debug/omascratch
+./target/debug/omaink
 ```
 
 ## Install and rollback
 
-No package exists yet; nothing is installed system-wide. Running the development binary writes only to XDG app directories (`~/.config/omascratch`, `~/.local/state/omascratch`, `~/.cache/omascratch`) and the chosen notebooks folder (default `~/Documents/OmaScratch`). Remove those paths to fully revert; notebooks are plain files you own. Packaging (PKGBUILD) is a later milestone.
+No package exists yet; nothing is installed system-wide. Running the development binary writes only to XDG app directories (`~/.config/omaink`, `~/.local/state/omaink`, `~/.cache/omaink`) and the chosen notebooks folder (default `~/Documents/OmaInk`). Remove those paths to fully revert; notebooks are plain files you own. Packaging (PKGBUILD) is a later milestone.
 
 ## Layout
 
-- `crates/omascratch-core` — domain model, commands, undo (UI-free, IO-free)
-- `crates/omascratch-ink` — stroke engine: samples, smoothing, outlines, hit-testing
-- `crates/omascratch-store` — on-disk format, atomic writes, notebook scanning
-- `crates/omascratch-theme` — Omarchy `colors.toml` → palette → GTK CSS (pure)
-- `crates/omascratch-gtk` — GTK4/libadwaita shell, binary `omascratch`
-- `packaging/` — desktop entry + icon (`co.think3.OmaScratch`)
+- `crates/omaink-core` — domain model, commands, undo (UI-free, IO-free)
+- `crates/omaink-ink` — stroke engine: samples, smoothing, outlines, hit-testing
+- `crates/omaink-store` — on-disk format, atomic writes, notebook scanning
+- `crates/omaink-theme` — Omarchy `colors.toml` → palette → GTK CSS (pure)
+- `crates/omaink-gtk` — GTK4/libadwaita shell, binary `omaink`
+- `packaging/` — desktop entry + icon (`co.think3.OmaInk`)
 
 ## Evidence
 

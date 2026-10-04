@@ -1,0 +1,20 @@
+//! Startup boundary: app identity, dependency construction, window creation.
+//! No document rules or persistence logic belongs here.
+
+mod app;
+mod canvas;
+mod library;
+mod perf;
+mod settings;
+mod sidebar;
+mod storage;
+mod text;
+mod theme;
+mod toolbar;
+
+/// Must equal the Wayland app_id, the .desktop basename and the icon basename.
+pub const APP_ID: &str = "co.think3.OmaInk";
+
+fn main() -> gtk4::glib::ExitCode {
+    app::run()
+}

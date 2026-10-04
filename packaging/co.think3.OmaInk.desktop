@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OmaInk
+GenericName=Notes
+Comment=Ink-first notes with an infinite canvas
+Exec=omaink
+Icon=co.think3.OmaInk
+Terminal=false
+Categories=Office;
+Keywords=notes;ink;stylus;notebook;canvas;
+StartupNotify=true

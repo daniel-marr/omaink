@@ -1,0 +1,22 @@
+[package]
+name = "omaink-store"
+description = "OmaInk persistence: on-disk schema, atomic writes, notebook scanning (UI-free)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+omaink-core.workspace = true
+omaink-ink.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zstd.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+kurbo.workspace = true
+tempfile.workspace = true

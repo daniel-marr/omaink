@@ -1,0 +1,18 @@
+[package]
+name = "omaink-ink"
+description = "OmaInk stroke engine: input samples, smoothing, outlines, hit-testing (UI-free)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+omaink-core.workspace = true
+serde.workspace = true
+kurbo.workspace = true
+freedraw.workspace = true
+rstar.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

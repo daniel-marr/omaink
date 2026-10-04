@@ -22,4 +22,4 @@ jobs:
       - name: Unit tests (headless; core crates only prove logic, not desktop behavior)
         run: cargo test --workspace --locked
       - name: Validate desktop entry
-        run: desktop-file-validate packaging/co.think3.OmaScratch.desktop
+        run: desktop-file-validate packaging/co.think3.OmaInk.desktop

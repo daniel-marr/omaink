@@ -1,25 +1,25 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/omascratch-core",
-    "crates/omascratch-ink",
-    "crates/omascratch-store",
-    "crates/omascratch-theme",
-    "crates/omascratch-gtk",
+    "crates/omaink-core",
+    "crates/omaink-ink",
+    "crates/omaink-store",
+    "crates/omaink-theme",
+    "crates/omaink-gtk",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/think3co/omascratch"
+repository = "https://github.com/think3co/omaink"
 rust-version = "1.92"
 
 [workspace.dependencies]
-omascratch-core = { path = "crates/omascratch-core" }
-omascratch-ink = { path = "crates/omascratch-ink" }
-omascratch-store = { path = "crates/omascratch-store" }
-omascratch-theme = { path = "crates/omascratch-theme" }
+omaink-core = { path = "crates/omaink-core" }
+omaink-ink = { path = "crates/omaink-ink" }
+omaink-store = { path = "crates/omaink-store" }
+omaink-theme = { path = "crates/omaink-theme" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

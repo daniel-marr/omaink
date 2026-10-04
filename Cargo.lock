@@ -608,7 +608,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "omascratch-core"
+name = "omaink-core"
 version = "0.1.0"
 dependencies = [
  "kurbo",
@@ -620,16 +620,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "omascratch-gtk"
+name = "omaink-gtk"
 version = "0.1.0"
 dependencies = [
  "gtk4",
  "kurbo",
  "libadwaita",
- "omascratch-core",
- "omascratch-ink",
- "omascratch-store",
- "omascratch-theme",
+ "omaink-core",
+ "omaink-ink",
+ "omaink-store",
+ "omaink-theme",
  "serde",
  "serde_json",
  "tracing",
@@ -637,12 +637,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "omascratch-ink"
+name = "omaink-ink"
 version = "0.1.0"
 dependencies = [
  "freedraw",
  "kurbo",
- "omascratch-core",
+ "omaink-core",
  "rstar",
  "serde",
  "serde_json",
@@ -650,12 +650,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "omascratch-store"
+name = "omaink-store"
 version = "0.1.0"
 dependencies = [
  "kurbo",
- "omascratch-core",
- "omascratch-ink",
+ "omaink-core",
+ "omaink-ink",
  "serde",
  "serde_json",
  "tempfile",
@@ -666,10 +666,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "omascratch-theme"
+name = "omaink-theme"
 version = "0.1.0"
 dependencies = [
- "omascratch-core",
+ "omaink-core",
  "serde",
  "thiserror",
  "toml 0.8.23",

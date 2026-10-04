@@ -8,11 +8,11 @@ Status: boundaries decided and scaffolded; implementation begins with the ink ve
 
 | Responsibility | Lives in | Notes |
 | --- | --- | --- |
-| Startup | `crates/omascratch-gtk/src/{main,app}.rs` | App identity (`co.think3.OmaScratch`), DI wiring, window creation. No document rules. |
-| Application/session | `omascratch-core::session` (M2) | `NoteSession`: open note, command dispatch, undo stacks, dirty tracking, autosave *policy*. Talks to storage via `trait NoteStore`. |
-| Domain/core | `omascratch-core` + `omascratch-ink` | Notebook/Folder/Note model, elements, commands, undo; stroke geometry, smoothing, hit-testing, spatial index. No gtk/cairo/std::fs. |
-| UI | `omascratch-gtk` | CanvasView widget, panels, docked draw toolbar, GSK rendering, transient drag/selection state. |
-| Desktop/storage adapters | `omascratch-store`, `omascratch-theme`, `omascratch-gtk/src/theme_watch.rs` (M5) | Persistence, Omarchy palette input + hot reload, portals. |
+| Startup | `crates/omaink-gtk/src/{main,app}.rs` | App identity (`co.think3.OmaInk`), DI wiring, window creation. No document rules. |
+| Application/session | `omaink-core::session` (M2) | `NoteSession`: open note, command dispatch, undo stacks, dirty tracking, autosave *policy*. Talks to storage via `trait NoteStore`. |
+| Domain/core | `omaink-core` + `omaink-ink` | Notebook/Folder/Note model, elements, commands, undo; stroke geometry, smoothing, hit-testing, spatial index. No gtk/cairo/std::fs. |
+| UI | `omaink-gtk` | CanvasView widget, panels, docked draw toolbar, GSK rendering, transient drag/selection state. |
+| Desktop/storage adapters | `omaink-store`, `omaink-theme`, `omaink-gtk/src/theme_watch.rs` (M5) | Persistence, Omarchy palette input + hot reload, portals. |
 
 Dependency direction: gtk shell → {core, ink, store, theme}; store → {core, ink}; ink → core; theme → core. Never the reverse.
 

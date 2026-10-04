@@ -245,6 +245,14 @@ fn install_shortcuts(
                 c.redo();
                 glib::Propagation::Stop
             }
+            gdk::Key::equal | gdk::Key::plus | gdk::Key::KP_Add if ctrl => {
+                c.zoom_step(true);
+                glib::Propagation::Stop
+            }
+            gdk::Key::minus | gdk::Key::underscore | gdk::Key::KP_Subtract if ctrl => {
+                c.zoom_step(false);
+                glib::Propagation::Stop
+            }
             gdk::Key::_0 if ctrl => {
                 c.reset_view();
                 glib::Propagation::Stop

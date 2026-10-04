@@ -1223,6 +1223,25 @@ impl CanvasView {
         st.editing.as_ref().map(|e| e.working.font_size).unwrap_or(st.text_font_size)
     }
 
+    /// Keyboard zoom (Ctrl+= / Ctrl+-): one 1.25× step, anchored at the
+    /// viewport center.
+    pub fn zoom_step(&self, zoom_in: bool) {
+        let mut st = self.imp().state.borrow_mut();
+        let old = st.zoom;
+        let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
+        let new = (old * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+        if (new - old).abs() < f64::EPSILON {
+            return;
+        }
+        let (w, h) = (self.width() as f64 / 2.0, self.height() as f64 / 2.0);
+        st.offset += kurbo::Vec2::new(w / old, h / old) - kurbo::Vec2::new(w / new, h / new);
+        st.zoom = new;
+        Self::clamp_offset(&mut st);
+        drop(st);
+        self.queue_draw();
+        self.notify_zoom();
+    }
+
     /// Return to 100% zoom, anchored at the viewport center.
     pub fn zoom_to_100(&self) {
         let mut st = self.imp().state.borrow_mut();

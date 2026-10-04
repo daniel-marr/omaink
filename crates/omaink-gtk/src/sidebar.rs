@@ -42,6 +42,10 @@ struct Inner {
     query: RefCell<String>,
     notebook_label: gtk::Label,
     selected: RefCell<Option<PathBuf>>,
+    /// Multi-selection (Ctrl/Shift+click); empty = just the open note.
+    multi: RefCell<Vec<PathBuf>>,
+    /// Shift+click range anchor (last plain or Ctrl click).
+    anchor: RefCell<Option<PathBuf>>,
     row_refs: RefCell<Vec<RowRef>>,
     editing: RefCell<Option<usize>>,
     collapsed: RefCell<HashSet<FolderId>>,
@@ -143,6 +147,8 @@ impl Sidebar {
             query: RefCell::new(String::new()),
             notebook_label,
             selected: RefCell::new(None),
+            multi: RefCell::new(Vec::new()),
+            anchor: RefCell::new(None),
             row_refs: RefCell::new(Vec::new()),
             editing: RefCell::new(None),
             collapsed: RefCell::new(collapsed),
@@ -165,7 +171,15 @@ impl Sidebar {
                 }
                 let r = sb.inner.row_refs.borrow().get(idx as usize).cloned();
                 match r {
-                    Some(RowRef::Note { path }) => sb.open_path(&path),
+                    Some(RowRef::Note { path }) => {
+                        let had_multi = !sb.inner.multi.borrow().is_empty();
+                        sb.inner.multi.borrow_mut().clear();
+                        *sb.inner.anchor.borrow_mut() = Some(path.clone());
+                        sb.open_path(&path);
+                        if had_multi {
+                            sb.refresh_idle();
+                        }
+                    }
                     Some(RowRef::Folder(id)) => {
                         {
                             let mut c = sb.inner.collapsed.borrow_mut();
@@ -179,6 +193,30 @@ impl Sidebar {
                     None => {}
                 }
             });
+        }
+
+        // Delete: the multi-selection; Esc: clear it.
+        {
+            let keys = gtk::EventControllerKey::new();
+            let sb = sidebar.clone();
+            keys.connect_key_pressed(move |_, key, _, _| {
+                if sb.inner.multi.borrow().is_empty() {
+                    return glib::Propagation::Proceed;
+                }
+                match key {
+                    gdk::Key::Delete | gdk::Key::KP_Delete => {
+                        sb.confirm_delete_multi();
+                        glib::Propagation::Stop
+                    }
+                    gdk::Key::Escape => {
+                        sb.inner.multi.borrow_mut().clear();
+                        sb.refresh_idle();
+                        glib::Propagation::Stop
+                    }
+                    _ => glib::Propagation::Proceed,
+                }
+            });
+            list.add_controller(keys);
         }
 
         let sb = sidebar.clone();
@@ -342,6 +380,8 @@ impl Sidebar {
         let mut hide_below: Option<u32> = None;
         let mut visible_idx = 0usize;
 
+        self.inner.multi.borrow_mut().retain(|p| p.exists());
+
         let query = self.inner.query.borrow().clone();
         let searching = !query.is_empty();
         let rows = if searching { self.search_rows(&query) } else { self.inner.library.rows() };
@@ -381,7 +421,8 @@ impl Sidebar {
             let (list_row, rref) =
                 self.build_row(&row, visible_idx, editing == Some(visible_idx), is_collapsed_folder);
             list.append(&list_row);
-            if is_selected {
+            // With a multi-selection, highlighting comes only from it.
+            if is_selected && self.inner.multi.borrow().is_empty() {
                 list.select_row(Some(&list_row));
             }
             refs.push(rref);
@@ -523,6 +564,38 @@ impl Sidebar {
         let list_row = gtk::ListBoxRow::new();
         list_row.set_child(Some(&hbox));
         list_row.set_activatable(true);
+        if let RowRef::Note { path } = &rref {
+            if self.inner.multi.borrow().contains(path) {
+                list_row.add_css_class("multi-selected");
+            }
+            // Ctrl+click toggles a note in the selection, Shift+click selects
+            // a range; neither opens the note. Capture phase so the ListBox
+            // doesn't activate the row first.
+            let sb = self.clone();
+            let path = path.clone();
+            let click = gtk::GestureClick::new();
+            click.set_button(gdk::BUTTON_PRIMARY);
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            click.connect_pressed(move |g, n, _, _| {
+                if n != 1 {
+                    return;
+                }
+                let m = g.current_event_state();
+                let ctrl = m.contains(gdk::ModifierType::CONTROL_MASK);
+                let shift = m.contains(gdk::ModifierType::SHIFT_MASK);
+                if !(ctrl || shift) {
+                    return;
+                }
+                g.set_state(gtk::EventSequenceState::Claimed);
+                if shift {
+                    sb.select_range_to(&path, ctrl);
+                } else {
+                    sb.toggle_in_selection(&path);
+                }
+                sb.refresh_idle();
+            });
+            list_row.add_controller(click);
+        }
 
         {
             let sb = self.clone();
@@ -566,12 +639,31 @@ impl Sidebar {
             let Some(src) = sb.inner.drag.borrow_mut().take() else { return false };
             let height = row_weak.upgrade().map(|w| w.height()).unwrap_or(26).max(1);
             let frac = y / height as f64;
+            // Dragging a note that's part of the multi-selection moves them all.
+            let group: Vec<PathBuf> = match &src {
+                RowRef::Note { path } if sb.inner.multi.borrow().contains(path) => sb.inner.multi.borrow().clone(),
+                RowRef::Note { path } => vec![path.clone()],
+                RowRef::Folder(_) => Vec::new(),
+            };
             match (&src, &r) {
-                (RowRef::Note { path }, RowRef::Note { path: tpath }) => {
-                    sb.inner.library.drop_note_near_note(path, tpath, frac >= 0.5);
+                (RowRef::Note { .. }, RowRef::Note { path: tpath }) => {
+                    if group.contains(tpath) {
+                        return false;
+                    }
+                    let mut after = tpath.clone();
+                    for (i, p) in group.iter().enumerate() {
+                        if i == 0 {
+                            sb.inner.library.drop_note_near_note(p, tpath, frac >= 0.5);
+                        } else {
+                            sb.inner.library.drop_note_near_note(p, &after, true);
+                        }
+                        after = p.clone();
+                    }
                 }
-                (RowRef::Note { path }, RowRef::Folder(fid)) => {
-                    sb.inner.library.drop_note_into_folder(path, Some(*fid));
+                (RowRef::Note { .. }, RowRef::Folder(fid)) => {
+                    for p in &group {
+                        sb.inner.library.drop_note_into_folder(p, Some(*fid));
+                    }
                 }
                 // Sub-folders are disabled: dropping a folder on a folder
                 // only reorders it (no nesting).
@@ -640,8 +732,12 @@ impl Sidebar {
             }
             RowRef::Note { path } => {
                 let path = path.clone();
+                let multi_n = {
+                    let m = self.inner.multi.borrow();
+                    if m.len() > 1 && m.contains(&path) { m.len() } else { 0 }
+                };
                 let rename = flat_button("Rename");
-                let del = flat_button("Delete note");
+                let del = flat_button(&if multi_n > 0 { format!("Delete {multi_n} notes") } else { "Delete note".into() });
                 del.add_css_class("destructive-action");
                 vbox.append(&rename);
                 vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
@@ -660,7 +756,11 @@ impl Sidebar {
                 let t = title.clone();
                 del.connect_clicked(move |_| {
                     pop.popdown();
-                    sb.confirm_delete_note(&path, &t);
+                    if multi_n > 0 {
+                        sb.confirm_delete_multi();
+                    } else {
+                        sb.confirm_delete_note(&path, &t);
+                    }
                 });
             }
         }
@@ -897,6 +997,108 @@ impl Sidebar {
             }
             sb.refresh_idle();
         });
+    }
+
+    /// Visible note rows, top to bottom.
+    fn visible_notes(&self) -> Vec<PathBuf> {
+        self.inner
+            .row_refs
+            .borrow()
+            .iter()
+            .filter_map(|r| match r {
+                RowRef::Note { path } => Some(path.clone()),
+                RowRef::Folder(_) => None,
+            })
+            .collect()
+    }
+
+    /// Ctrl+click: add/remove one note. Starting a selection includes the
+    /// open note, like a file manager.
+    fn toggle_in_selection(&self, path: &Path) {
+        let mut multi = self.inner.multi.borrow_mut();
+        if multi.is_empty() {
+            if let Some(open) = self.inner.selected.borrow().clone() {
+                if open != path {
+                    multi.push(open);
+                }
+            }
+        }
+        if let Some(i) = multi.iter().position(|p| p == path) {
+            multi.remove(i);
+        } else {
+            multi.push(path.to_path_buf());
+        }
+        drop(multi);
+        *self.inner.anchor.borrow_mut() = Some(path.to_path_buf());
+        self.sort_multi();
+    }
+
+    /// Shift+click: everything between the anchor (or open note) and
+    /// `path`; with Ctrl too, add the range to the existing selection.
+    fn select_range_to(&self, path: &Path, extend: bool) {
+        let notes = self.visible_notes();
+        let anchor = self.inner.anchor.borrow().clone().or_else(|| self.inner.selected.borrow().clone());
+        let (Some(a), Some(b)) = (
+            anchor.and_then(|a| notes.iter().position(|p| *p == a)),
+            notes.iter().position(|p| p == path),
+        ) else {
+            return self.toggle_in_selection(path);
+        };
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let mut multi = self.inner.multi.borrow_mut();
+        if !extend {
+            multi.clear();
+        }
+        for p in &notes[lo..=hi] {
+            if !multi.contains(p) {
+                multi.push(p.clone());
+            }
+        }
+        drop(multi);
+        self.sort_multi();
+    }
+
+    /// Keep the selection in on-screen order (moves keep their order).
+    fn sort_multi(&self) {
+        let notes = self.visible_notes();
+        self.inner
+            .multi
+            .borrow_mut()
+            .sort_by_key(|p| notes.iter().position(|q| q == p).unwrap_or(usize::MAX));
+    }
+
+    fn confirm_delete_multi(&self) {
+        let paths = self.inner.multi.borrow().clone();
+        if paths.is_empty() {
+            return;
+        }
+        let n = paths.len();
+        let dialog = adw::AlertDialog::new(
+            Some(&if n == 1 { "Delete 1 note?".to_string() } else { format!("Delete {n} notes?") }),
+            Some("They move to the notebook's trash."),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("delete", &if n == 1 { "Delete note".to_string() } else { format!("Delete {n} notes") });
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        let sb = self.clone();
+        dialog.connect_response(None, move |_, resp| {
+            if resp != "delete" {
+                return;
+            }
+            for path in &paths {
+                if let Some(id) = note_id_from_path(path) {
+                    sb.inner.library.delete_note(id);
+                }
+                if sb.inner.selected.borrow().as_deref() == Some(path.as_path()) {
+                    *sb.inner.selected.borrow_mut() = None;
+                }
+            }
+            sb.inner.multi.borrow_mut().clear();
+            sb.refresh_idle();
+        });
+        let win = self.widget.root().and_downcast::<gtk::Window>();
+        dialog.present(win.as_ref());
     }
 
     fn confirm_delete_note(&self, path: &Path, title: &str) {

@@ -211,6 +211,10 @@ window {{
     background-color: {sel};
     color: {fg};
 }}
+.navigation-sidebar row.multi-selected {{
+    background-color: {sel};
+    color: {fg};
+}}
 .row-title {{
     font-size: 0.875rem;
     font-weight: 400;

@@ -376,27 +376,6 @@ fn install_shortcuts(
     split: &adw::OverlaySplitView,
     toggle_fullscreen: impl Fn() + 'static,
 ) {
-    // Home → top-left of the page. Capture phase so the sidebar list doesn't
-    // take it, but left alone while typing (text boxes, rename fields).
-    {
-        let home = gtk::EventControllerKey::new();
-        home.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let c = canvas.clone();
-        let win = window.clone();
-        home.connect_key_pressed(move |_, key, _, modifiers| {
-            let typing = gtk::prelude::GtkWindowExt::focus(&win)
-                .is_some_and(|w| w.is::<gtk::TextView>() || w.is::<gtk::Text>() || w.is::<gtk::Editable>());
-            if matches!(key, gdk::Key::Home | gdk::Key::KP_Home)
-                && !typing
-                && !modifiers.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::ALT_MASK)
-            {
-                c.go_home();
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        window.add_controller(home);
-    }
     let keys = gtk::EventControllerKey::new();
     let c = canvas.clone();
     let split = split.clone();

@@ -881,7 +881,6 @@ impl Sidebar {
             ("Ctrl+F", "Search note titles (Esc clears)"),
             ("Ctrl+= / Ctrl+−", "Zoom in / out"),
             ("Ctrl+0", "Reset view (100%, top-left)"),
-            ("Home", "Go to the top-left of the page"),
             ("Insert space tool", "Drag down from a line to push content down; up to close a gap"),
             ("Scroll / middle-drag", "Pan"),
             ("Ctrl+Scroll", "Zoom"),

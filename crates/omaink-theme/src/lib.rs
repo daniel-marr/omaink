@@ -243,6 +243,14 @@ window {{
     padding: 0 4px;
     border-radius: 4px;
 }}
+.pen-strip undershoot.left {{
+    background: linear-gradient(to right, {dark_bg}, alpha({dark_bg}, 0));
+    min-width: 18px;
+}}
+.pen-strip undershoot.right {{
+    background: linear-gradient(to left, {dark_bg}, alpha({dark_bg}, 0));
+    min-width: 18px;
+}}
 .main-toolbar {{
     background-color: {dark_bg};
     border-bottom: 1px solid {sel};
@@ -281,9 +289,16 @@ window {{
     border-bottom: 3px solid {accent};
     border-radius: 0;
 }}
+.compact-btn {{
+    min-width: 26px;
+    min-height: 28px;
+    padding: 2px 4px;
+}}
 .zoom-indicator {{
     font-size: 0.85rem;
-    min-width: 52px;
+    min-width: 44px;
+    padding-left: 2px;
+    padding-right: 2px;
     color: {dark_fg};
 }}
 .swatch-btn {{

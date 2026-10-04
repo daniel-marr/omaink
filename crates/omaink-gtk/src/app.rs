@@ -89,6 +89,7 @@ fn build_window(app: &adw::Application) {
 
     let fs_btn = gtk::Button::from_icon_name("view-fullscreen-symbolic");
     fs_btn.add_css_class("flat");
+    fs_btn.add_css_class("compact-btn");
     fs_btn.set_tooltip_text(Some("Fullscreen canvas (F11)"));
     // Zoom indicator: shows the live zoom, click to return to 100%.
     let zoom_btn = gtk::Button::with_label("100%");
@@ -97,9 +98,11 @@ fn build_window(app: &adw::Application) {
     zoom_btn.set_tooltip_text(Some("Zoom — click for 100% (Ctrl+0 resets view)"));
     let zoom_out_btn = gtk::Button::with_label("−");
     zoom_out_btn.add_css_class("flat");
+    zoom_out_btn.add_css_class("compact-btn");
     zoom_out_btn.set_tooltip_text(Some("Zoom out (Ctrl+−)"));
     let zoom_in_btn = gtk::Button::with_label("+");
     zoom_in_btn.add_css_class("flat");
+    zoom_in_btn.add_css_class("compact-btn");
     zoom_in_btn.set_tooltip_text(Some("Zoom in (Ctrl+=)"));
     {
         let c = canvas.clone();
@@ -116,8 +119,8 @@ fn build_window(app: &adw::Application) {
         canvas.set_on_zoom(move |z| zb.set_label(&format!("{:.0}%", z * 100.0)));
     }
 
-    let toolbar_end = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    toolbar_end.set_margin_end(8);
+    let toolbar_end = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    toolbar_end.set_margin_end(4);
     let zoom_group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     zoom_group.append(&zoom_out_btn);
     zoom_group.append(&zoom_btn);

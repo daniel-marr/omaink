@@ -667,6 +667,9 @@ struct Inner {
     drag_src: Cell<Option<usize>>,
     suppress_click: Cell<bool>,
     gallery: gtk::Box,
+    /// Scrolling strip around the gallery: shrinks on narrow windows (no
+    /// visible scrollbar; wheel/trackpad scroll it).
+    pen_strip: gtk::ScrolledWindow,
     select_btn: gtk::Button,
     lasso_btn: gtk::Button,
     space_btn: gtk::Button,
@@ -689,7 +692,7 @@ impl Toolbar {
     fn new(canvas: &CanvasView) -> Toolbar {
         let st = load_state();
 
-        let widget = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let widget = gtk::Box::new(gtk::Orientation::Horizontal, 3);
         widget.add_css_class("draw-toolbar");
         widget.set_margin_start(8);
         widget.set_valign(gtk::Align::Center);
@@ -737,6 +740,7 @@ impl Toolbar {
             drag_src: Cell::new(None),
             suppress_click: Cell::new(false),
             gallery: gtk::Box::new(gtk::Orientation::Horizontal, 1),
+            pen_strip: gtk::ScrolledWindow::new(),
             select_btn: select_btn.clone(),
             lasso_btn: lasso_btn.clone(),
             space_btn: space_btn.clone(),
@@ -847,8 +851,32 @@ impl Toolbar {
         tb.widget.append(&text_btn);
         tb.widget.append(&vsep());
 
-        // Gallery: eraser chip first, then pens.
-        tb.widget.append(&tb.inner.gallery);
+        // Gallery: eraser chip first, then pens — in a strip that gives up
+        // width first when the window is narrow, so the rest of the toolbar
+        // (zoom, fullscreen) always fits. No scrollbar: mouse wheel or a
+        // trackpad swipe scrolls it; edge fades show there's more.
+        {
+            let strip = &tb.inner.pen_strip;
+            strip.set_policy(gtk::PolicyType::External, gtk::PolicyType::Never);
+            strip.set_propagate_natural_width(true);
+            // Narrowest: the eraser and one pen.
+            strip.set_min_content_width(70);
+            strip.set_has_frame(false);
+            strip.add_css_class("pen-strip");
+            strip.set_child(Some(&tb.inner.gallery));
+            let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+            let s2 = strip.clone();
+            wheel.connect_scroll(move |c, _, dy| {
+                let adj = s2.hadjustment();
+                // Discrete wheel clicks move a couple of chips; smooth
+                // (trackpad) deltas are already in pixels.
+                let step = if c.unit() == gtk::gdk::ScrollUnit::Wheel { 70.0 } else { 1.0 };
+                adj.set_value(adj.value() + dy * step);
+                glib::Propagation::Stop
+            });
+            strip.add_controller(wheel);
+        }
+        tb.widget.append(&tb.inner.pen_strip);
 
         // Add Pen ▾.
         let add_pen = gtk::MenuButton::new();
@@ -1254,11 +1282,29 @@ impl Toolbar {
             };
             if active {
                 w.add_css_class("pen-active");
+                self.scroll_chip_into_view(&w);
             } else {
                 w.remove_css_class("pen-active");
             }
             child = w.next_sibling();
         }
+    }
+
+    /// Keep the active chip visible in the pen strip (after layout).
+    fn scroll_chip_into_view(&self, chip: &gtk::Widget) {
+        let strip = self.inner.pen_strip.clone();
+        let gallery = self.inner.gallery.clone();
+        let chip = chip.clone();
+        glib::idle_add_local_once(move || {
+            let Some(b) = chip.compute_bounds(&gallery) else { return };
+            let adj = strip.hadjustment();
+            let (x0, x1) = (b.x() as f64, (b.x() + b.width()) as f64);
+            if x0 < adj.value() {
+                adj.set_value(x0);
+            } else if x1 > adj.value() + adj.page_size() {
+                adj.set_value(x1 - adj.page_size());
+            }
+        });
     }
 
     // -- gallery --

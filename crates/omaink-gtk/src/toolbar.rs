@@ -539,6 +539,11 @@ fn lasso_glyph() -> gtk::DrawingArea {
 /// A 22px outline glyph drawn on Lucide's 24-unit grid (ISC), matching the
 /// hand icon's stroke.
 fn lucide_glyph(draw: impl Fn(&gtk::cairo::Context) + 'static) -> gtk::DrawingArea {
+    lucide_glyph_stroke(1.8, draw)
+}
+
+/// `lucide_glyph` with a custom stroke width (in 24-grid units).
+fn lucide_glyph_stroke(stroke: f64, draw: impl Fn(&gtk::cairo::Context) + 'static) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_width(22);
     area.set_content_height(22);
@@ -548,13 +553,30 @@ fn lucide_glyph(draw: impl Fn(&gtk::cairo::Context) + 'static) -> gtk::DrawingAr
         let k = (w.min(h) as f64) / 24.0;
         cr.scale(k, k);
         cr.set_source_rgb(0.78, 0.82, 0.96);
-        cr.set_line_width(1.8);
+        cr.set_line_width(stroke);
         cr.set_line_cap(gtk::cairo::LineCap::Round);
         cr.set_line_join(gtk::cairo::LineJoin::Round);
         draw(cr);
         let _ = cr.stroke();
     });
     area
+}
+
+/// Undo / redo: a bold hooked arrow (Lucide `undo-2`, mirrored for redo).
+fn history_glyph(redo: bool) -> gtk::DrawingArea {
+    lucide_glyph_stroke(1.8, move |cr| {
+        if redo {
+            cr.translate(24.0, 0.0);
+            cr.scale(-1.0, 1.0);
+        }
+        cr.move_to(9.0, 14.0);
+        cr.line_to(4.0, 9.0);
+        cr.line_to(9.0, 4.0);
+        cr.move_to(4.0, 9.0);
+        cr.line_to(14.5, 9.0);
+        cr.arc(14.5, 14.5, 5.5, -std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+        cr.line_to(11.0, 20.0);
+    })
 }
 
 /// Insert space: a line with arrows pushing apart above and below it.
@@ -751,12 +773,14 @@ impl Toolbar {
         let tb = Toolbar { widget, inner };
 
         // Undo / redo.
-        let undo = gtk::Button::from_icon_name("edit-undo-symbolic");
+        let undo = gtk::Button::new();
+        undo.set_child(Some(&history_glyph(false)));
         undo.add_css_class("flat");
         undo.set_tooltip_text(Some("Undo (Ctrl+Z)"));
         let c = canvas.clone();
         undo.connect_clicked(move |_| c.undo());
-        let redo = gtk::Button::from_icon_name("edit-redo-symbolic");
+        let redo = gtk::Button::new();
+        redo.set_child(Some(&history_glyph(true)));
         redo.add_css_class("flat");
         redo.set_tooltip_text(Some("Redo (Ctrl+Shift+Z)"));
         let c = canvas.clone();
@@ -782,7 +806,22 @@ impl Toolbar {
             let t = tb.clone();
             space_btn.connect_clicked(move |_| t.set_mode(Mode::InsertSpace));
         }
+        {
+            let t = tb.clone();
+            text_btn.connect_clicked(move |b| {
+                let editing = t.inner.canvas.is_editing_text();
+                if t.inner.mode.get() == Mode::Text || editing {
+                    if t.inner.mode.get() != Mode::Text {
+                        t.set_mode(Mode::Text);
+                    }
+                    t.open_text_flyout(b.clone().upcast());
+                } else {
+                    t.set_mode(Mode::Text);
+                }
+            });
+        }
         tb.widget.append(&select_btn);
+        tb.widget.append(&text_btn);
         tb.widget.append(&pan_btn);
         tb.widget.append(&lasso_btn);
         tb.widget.append(&space_btn);
@@ -834,21 +873,6 @@ impl Toolbar {
         tb.widget.append(&copy_btn);
         tb.widget.append(&paste_btn);
         tb.widget.append(&image_btn);
-        {
-            let t = tb.clone();
-            text_btn.connect_clicked(move |b| {
-                let editing = t.inner.canvas.is_editing_text();
-                if t.inner.mode.get() == Mode::Text || editing {
-                    if t.inner.mode.get() != Mode::Text {
-                        t.set_mode(Mode::Text);
-                    }
-                    t.open_text_flyout(b.clone().upcast());
-                } else {
-                    t.set_mode(Mode::Text);
-                }
-            });
-        }
-        tb.widget.append(&text_btn);
         tb.widget.append(&vsep());
 
         // Gallery: eraser chip first, then pens — in a strip that gives up

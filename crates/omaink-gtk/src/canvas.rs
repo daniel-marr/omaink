@@ -1356,6 +1356,10 @@ impl CanvasView {
             self.commit_text_edit();
         }
         self.imp().state.borrow_mut().active = tool;
+        // Selection only survives tools that can act on it.
+        if !matches!(tool, ActiveTool::Select | ActiveTool::Lasso | ActiveTool::Pan | ActiveTool::Text) {
+            self.clear_selection();
+        }
         self.set_cursor_from_name(if tool == ActiveTool::InsertSpace { Some("row-resize") } else { None });
         // Tool-specific overlays (the eraser ring) must update now.
         self.queue_draw();
@@ -1373,6 +1377,7 @@ impl CanvasView {
         st.cur_color = color;
         st.cur_width = width;
         drop(st);
+        self.clear_selection();
         self.set_cursor_from_name(None);
         self.queue_draw();
     }
@@ -1384,6 +1389,7 @@ impl CanvasView {
         st.active = ActiveTool::Shape;
         st.shape_kind = kind;
         drop(st);
+        self.clear_selection();
         self.set_cursor_from_name(None);
         self.queue_draw();
     }
@@ -1890,6 +1896,7 @@ impl CanvasView {
         st.eraser_kind = kind;
         st.eraser_radius = radius;
         drop(st);
+        self.clear_selection();
         self.set_cursor_from_name(None);
         self.queue_draw();
     }

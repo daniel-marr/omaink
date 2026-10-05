@@ -6,9 +6,9 @@ Application licence: **GPL-3.0-or-later** (see [LICENSE](LICENSE)).
 ## Artwork
 
 - **App icon / logo** (`packaging/logo/OmaInk.svg`, installed as
-  `co.think3.OmaInk.svg`): by Daniel Marr, incorporating the OMA logo.
-  The OMA logo is a trademark of the Omarchy Foundation. OmaInk is an
-  independent community project, not affiliated with or endorsed by Omarchy.
+  `co.think3.OmaInk.svg`): original artwork by Daniel Marr. It does not
+  include the Omarchy logo. OmaInk is an independent community project, not
+  affiliated with or endorsed by Omarchy.
 - **Toolbar and sidebar glyphs**: drawn in code (cairo). The pan (hand), copy,
   paste (clipboard) and help (circle-help) glyphs are traced from
   [Lucide](https://lucide.dev) icons — ISC License, Copyright (c) Lucide

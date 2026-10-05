@@ -1,10 +1,12 @@
 # OmaInk
 
+<img alt="OmaInk logo" width="96" src="packaging/logo/OmaInk.svg">
+
 <img alt="Built for Omarchy: App" height="20" src="https://raw.githubusercontent.com/tcballard/omarchy-badges/75975e5b5bf75e7ede3764bcd2950046f7abfe2c/badges/v1/omarchy-app.svg">
 
 Ink-first notes for Omarchy: notebooks, folders and notes on a growing page, built around fluid stylus input (pressure and tilt via Wayland tablet-v2), styled from the active Omarchy theme, with a synced-folder-safe file format.
 
-OmaInk is an independent community project, not affiliated with or endorsed by Omarchy. The OMA logo is a trademark of the Omarchy Foundation.
+OmaInk is an independent community project, not affiliated with or endorsed by Omarchy. The OmaInk logo is original artwork and does not use the Omarchy logo; the Omarchy name and logo belong to their owners.
 
 > **Alpha.** OmaInk is early software for testing and feedback. Expect rough edges and changes; keep backups of notes you care about. Please report problems via [GitHub Issues](../../issues).
 

@@ -62,7 +62,11 @@ The app itself writes only to XDG app directories (`~/.config/omaink`, `~/.local
 - `crates/omaink-store` — on-disk format, atomic writes, notebook scanning
 - `crates/omaink-theme` — Omarchy `colors.toml` → palette → GTK CSS (pure)
 - `crates/omaink-gtk` — GTK4/libadwaita shell, binary `omaink`
-- `packaging/` — desktop entry, icon (`co.think3.OmaInk`), logo source and `install-local.sh`
+- `packaging/` — desktop entry, icon (`co.think3.OmaInk`), logo source, screenshots and `install-local.sh`
+
+## Screenshot
+
+![OmaInk showing a handwritten note with sketches, checkboxes and the pen toolbar](packaging/screenshots/omaink-screenshot.png)
 
 ## Evidence
 

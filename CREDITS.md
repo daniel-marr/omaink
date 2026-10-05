@@ -10,7 +10,7 @@ Application licence: **GPL-3.0-or-later** (see [LICENSE](LICENSE)).
   include the Omarchy logo. OmaInk is an independent community project, not
   affiliated with or endorsed by Omarchy.
 - **Toolbar and sidebar glyphs**: drawn in code (cairo). The pan (hand), copy,
-  paste (clipboard) and help (circle-help) glyphs are traced from
+  paste (clipboard), undo/redo and help (circle-help) glyphs are traced from
   [Lucide](https://lucide.dev) icons — ISC License, Copyright (c) Lucide
   Contributors. All other glyphs (pens, highlighter, eraser, lasso, insert
   space, settings gear, text, shapes, page) are original to this project.

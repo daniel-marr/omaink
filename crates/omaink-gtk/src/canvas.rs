@@ -357,6 +357,9 @@ mod imp {
             obj.set_focusable(true);
             obj.set_hexpand(true);
             obj.set_vexpand(true);
+            // Content scrolled past the edges (images, ink, text) must never
+            // paint outside the canvas, e.g. over the toolbar.
+            obj.set_overflow(gtk::Overflow::Hidden);
             obj.setup_input();
         }
     }
